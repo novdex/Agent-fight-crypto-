@@ -27,7 +27,10 @@ class AnthropicAgent(BaseAgent):
         except anthropic.AnthropicError as exc:
             raise AgentError(f"Anthropic API call failed for agent {self.name!r}: {exc}") from exc
 
-        text = "".join(
-            block.text for block in response.content if getattr(block, "type", None) == "text"
-        )
-        return parse_signals(text, self.name, snapshot)
+        try:
+            text = "".join(
+                block.text for block in response.content if getattr(block, "type", None) == "text"
+            )
+            return parse_signals(text, self.name, snapshot)
+        except Exception as exc:  # one agent's failure must never crash a round
+            raise AgentError(f"Failed to parse reply from agent {self.name!r}: {exc}") from exc

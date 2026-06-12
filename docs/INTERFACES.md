@@ -120,7 +120,8 @@ Weight update (multiplicative-weights, the "decision power" mechanic):
 ```
 w[a] *= exp(eta * round_score[a])    # winners gain, losers lose
 normalize to sum 1
-clamp each to [min_weight, max_weight], then renormalize once
+project onto [min_weight, max_weight] (iterative pin-and-rescale) so the
+bounds hold exactly and the weights still sum to 1
 ```
 
 Agents present in `weights` but missing from `agent_scores` keep their raw

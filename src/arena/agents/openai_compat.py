@@ -40,4 +40,7 @@ class OpenAICompatAgent(BaseAgent):
 
         if not isinstance(text, str):
             raise AgentError(f"Non-text completion content for agent {self.name!r}")
-        return parse_signals(text, self.name, snapshot)
+        try:
+            return parse_signals(text, self.name, snapshot)
+        except Exception as exc:  # one agent's failure must never crash a round
+            raise AgentError(f"Failed to parse reply from agent {self.name!r}: {exc}") from exc

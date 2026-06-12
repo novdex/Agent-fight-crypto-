@@ -130,5 +130,5 @@ def parse_signals(text: str, agent_name: str, snapshot: MarketSnapshot) -> list[
     signals: list[Signal] = []
     for coin in snapshot.coins:
         sym = coin.symbol.upper()
-        signals.append(parsed.get(sym) or _flat_signal(agent_name, coin.symbol, coin.price_usd))
+        signals.append(parsed.get(sym) or _flat_signal(agent_name, sym, coin.price_usd))
     return signals

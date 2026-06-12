@@ -26,8 +26,12 @@ def update_weights(
     """Multiplicative-weights update.
 
     ``w[a] *= exp(eta * score[a])`` (missing score -> 0, i.e. unchanged),
-    normalize to sum 1, clamp each weight to [min_weight, max_weight],
-    then renormalize once.
+    normalize to sum 1, then project onto the box [min_weight, max_weight]
+    so the bounds hold exactly AND the weights still sum to 1. (A naive
+    clamp-then-renormalize can push the top weight back above max_weight;
+    the iterative projection cannot.) If the bounds are infeasible for the
+    agent count (n*min > 1 or n*max < 1), normalized weights are returned
+    unclamped.
     """
     if not weights:
         return {}
@@ -44,11 +48,30 @@ def update_weights(
     else:
         updated = {name: w / total for name, w in updated.items()}
 
-    clamped = {
-        name: min(max(w, min_weight), max_weight) for name, w in updated.items()
-    }
+    n = len(updated)
+    if n * min_weight > 1.0 or n * max_weight < 1.0:
+        return updated  # bounds infeasible for this agent count
 
-    clamped_total = sum(clamped.values())
-    if clamped_total <= 0.0:
-        return equal_weights(list(weights))
-    return {name: w / clamped_total for name, w in clamped.items()}
+    # Iterative box projection: pin violators to their bound, rescale the
+    # remaining mass over the free agents, repeat until nothing violates.
+    pinned: dict[str, float] = {}
+    free = dict(updated)
+    while free:
+        free_mass = 1.0 - sum(pinned.values())
+        free_total = sum(free.values())
+        if free_total <= 0.0:
+            scaled = {name: free_mass / len(free) for name in free}
+        else:
+            scaled = {name: w / free_total * free_mass for name, w in free.items()}
+        violations = {
+            name: (min_weight if w < min_weight else max_weight)
+            for name, w in scaled.items()
+            if w < min_weight or w > max_weight
+        }
+        if not violations:
+            return {**pinned, **scaled}
+        pinned.update(violations)
+        for name in violations:
+            del free[name]
+    s = sum(pinned.values())
+    return {name: w / s for name, w in pinned.items()} if s > 0 else equal_weights(list(weights))
