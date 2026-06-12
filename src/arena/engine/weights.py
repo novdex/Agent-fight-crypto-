@@ -66,6 +66,9 @@ def update_weights(
 
     # Iterative box projection: pin violators to their bound, rescale the
     # remaining mass over the free agents, repeat until nothing violates.
+    # Upper violators are pinned first — rescaling the freed mass can lift
+    # apparent lower violators back above the floor, so judging both sides
+    # in the same pass would over-pin and break the bounds.
     pinned: dict[str, float] = {}
     free = dict(updated)
     while free:
@@ -76,10 +79,12 @@ def update_weights(
         else:
             scaled = {name: w / free_total * free_mass for name, w in free.items()}
         violations = {
-            name: (min_weight if w < min_weight else max_weight)
-            for name, w in scaled.items()
-            if w < min_weight or w > max_weight
+            name: max_weight for name, w in scaled.items() if w > max_weight
         }
+        if not violations:
+            violations = {
+                name: min_weight for name, w in scaled.items() if w < min_weight
+            }
         if not violations:
             return {**pinned, **scaled}
         pinned.update(violations)
