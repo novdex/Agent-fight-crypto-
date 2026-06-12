@@ -19,6 +19,8 @@ class OpenAICompatAgent(BaseAgent):
     def __init__(self, spec: AgentSpec):
         super().__init__(spec)
         self._api_key = api_key_for(spec.api_key_env)
+        self.last_raw: str = ""
+        self.last_usage: dict = {}
 
     def _post_with_retry(self, url: str, body: dict) -> httpx.Response:
         """POST with exponential backoff on transient failures (httpx has no
@@ -55,16 +57,32 @@ class OpenAICompatAgent(BaseAgent):
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
         prompt = build_prompt(snapshot)
         base_url = self.spec.base_url.rstrip("/")
+        body: dict = {
+            "model": self.spec.model,
+            "messages": [{"role": "user", "content": prompt}],
+            # Structured outputs (improvement #92); some compat endpoints
+            # reject the parameter — we retry without it below.
+            "response_format": {"type": "json_object"},
+        }
         try:
-            response = self._post_with_retry(
-                f"{base_url}/chat/completions",
-                {
-                    "model": self.spec.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
+            try:
+                response = self._post_with_retry(f"{base_url}/chat/completions", body)
+            except AgentError as exc:
+                # Immediate 4xx rejection usually means the endpoint doesn't
+                # support response_format — drop it and try once more.
+                # Exhausted-transient-retries errors ("after N attempts")
+                # are real outages: re-raise rather than doubling traffic.
+                if "attempts" in str(exc) or "response_format" not in body:
+                    raise
+                body.pop("response_format", None)
+                response = self._post_with_retry(f"{base_url}/chat/completions", body)
             payload = response.json()
             text = payload["choices"][0]["message"]["content"]
+            usage = payload.get("usage") or {}
+            self.last_usage = {
+                "input_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "output_tokens": int(usage.get("completion_tokens", 0) or 0),
+            }
         except httpx.HTTPError as exc:
             raise AgentError(f"HTTP request failed for agent {self.name!r}: {exc}") from exc
         except (KeyError, IndexError, TypeError, ValueError) as exc:
@@ -74,6 +92,7 @@ class OpenAICompatAgent(BaseAgent):
 
         if not isinstance(text, str):
             raise AgentError(f"Non-text completion content for agent {self.name!r}")
+        self.last_raw = text
         try:
             return parse_signals(text, self.name, snapshot)
         except Exception as exc:  # one agent's failure must never crash a round
