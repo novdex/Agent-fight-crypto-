@@ -48,7 +48,8 @@ equity curves diverge over time.
    ```
    w[a] *= exp(eta * round_score[a])    # winners gain, losers lose
    normalize to sum 1
-   clamp each to [min_weight, max_weight], then renormalize once
+   project onto [min_weight, max_weight] so the bounds hold exactly
+   and the weights still sum to 1
    ```
 
    The consensus is *excluded* from weight updates (it is derived, it doesn't
