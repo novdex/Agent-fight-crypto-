@@ -28,36 +28,44 @@ equity curves diverge over time.
    way; the heaviest direction wins (ties go FLAT). The consensus is stored as
    a fifth fighter named `consensus`.
 3. **Evaluation (24h later)** — `arena evaluate` fetches current prices and
-   scores every signal of every due round. The exact scoring formula
-   (deterministic, bounded to `[-1, 1]`):
+   scores every signal of every due round with the **strictly proper Brier
+   rule** (deterministic, bounded to `[-1, 1]`):
 
    ```
    r = 100 * (price_now - price_then) / price_then        # realized % move
-   raw = r          if direction == LONG
-   raw = -r         if direction == SHORT
-   raw = flat_threshold_pct - abs(r)   if direction == FLAT
-   score = confidence * tanh(raw / 5.0)
+   outcome = LONG if r > flat_threshold_pct, SHORT if r < -flat_threshold_pct, else FLAT
+   score = 1 - sum_i (p_i - onehot(outcome)_i)^2          # over {LONG, SHORT, FLAT}
    ```
 
-   An agent's **round score** is the mean of its per-signal scores. Calling a
-   big move correctly with high confidence scores near `+1`; calling it wrong
-   scores near `-1`; a FLAT call is rewarded only if the move stayed inside
-   `flat_threshold_pct`.
+   Agents report full probability vectors `p_long/p_short/p_flat`; because the
+   Brier rule is strictly proper (Gneiting & Raftery 2007), the *only* way for
+   an agent to maximize its expected score is to report its honest
+   probabilities — overconfidence is punished automatically. A perfect
+   confident call scores `+1`, a confident miss `-1`, the uniform forecast
+   `1/3`. Legacy direction+confidence signals fall back to the original
+   `confidence × tanh(raw/5)` rule. An agent's **round score** is the mean of
+   its per-signal scores.
 4. **Multiplicative weight update** — the "decision power" mechanic:
 
    ```
-   w[a] *= exp(eta * round_score[a])    # winners gain, losers lose
+   eta(t) = sqrt(ln N / t)              # anytime-optimal Hedge schedule
+   w[a] *= exp(eta(t) * round_score[a]) # winners gain, losers lose
    normalize to sum 1
    project onto [min_weight, max_weight] so the bounds hold exactly
    and the weights still sum to 1
    ```
 
+   The learning rate decays over time (big shifts while evidence is scarce,
+   fine adjustments once track records exist — the O(√(T ln N)) regret
+   schedule). Set `adaptive_eta: false` to use the fixed `eta` instead.
+
    The consensus is *excluded* from weight updates (it is derived, it doesn't
    compete for power), but its paper equity *is* tracked alongside the agents'.
 5. **Paper trading** — after each evaluated round, every agent (and the
    consensus) stakes `stake_fraction` (50%) of its equity equally across its
-   non-FLAT signals; PnL follows the realized moves. Everyone starts at
-   $10,000 of strictly imaginary money.
+   non-FLAT signals; PnL follows the realized moves, **minus taker fees**
+   (`fee_rate_bps` per side, default 5 bps, charged on entry and exit).
+   Everyone starts at $10,000 of strictly imaginary money.
 
 ## Architecture
 

@@ -148,7 +148,7 @@ def test_parse_signals_drops_unknown_symbols() -> None:
 # ---------------------------------------------------------------- MockAgent
 
 
-def test_mock_agent_deterministic_same_snapshot() -> None:
+def test_mock_agent_deterministic_samemake_snapshot() -> None:
     snap = make_snapshot()
     agent = MockAgent(AgentSpec(name="m1", provider="mock", seed=42))
     first = agent.generate_signals(snap)
@@ -353,3 +353,56 @@ def test_anthropic_agent_parses_text_blocks(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["max_tokens"] == 16000
     assert captured["thinking"] == {"type": "adaptive"}
     assert "temperature" not in captured
+
+
+# ---------------------------------------------------------------------------
+# Probability-vector parsing (Brier upgrade)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_signals_probability_vector() -> None:
+    snap = make_snapshot()
+    text = json.dumps(
+        {
+            "signals": [
+                {"symbol": "BTC", "p_long": 0.7, "p_short": 0.2, "p_flat": 0.1, "rationale": "up"},
+                {"symbol": "ETH", "p_long": 0.1, "p_short": 0.6, "p_flat": 0.3, "rationale": "dn"},
+            ]
+        }
+    )
+    by_sym = {s.symbol: s for s in parse_signals(text, "a", snap)}
+    btc = by_sym["BTC"]
+    assert btc.direction == Direction.LONG
+    assert btc.confidence == pytest.approx(0.7)
+    assert (btc.p_long, btc.p_short, btc.p_flat) == (
+        pytest.approx(0.7), pytest.approx(0.2), pytest.approx(0.1),
+    )
+    assert by_sym["ETH"].direction == Direction.SHORT
+    # Backfilled coin has no probability vector
+    assert by_sym["SOL"].p_long is None
+
+
+def test_parse_signals_unnormalized_probs_renormalized() -> None:
+    snap = make_snapshot()
+    text = json.dumps(
+        {"signals": [{"symbol": "BTC", "p_long": 0.8, "p_short": 0.4, "p_flat": 0.4}]}
+    )
+    sig = {s.symbol: s for s in parse_signals(text, "a", snap)}["BTC"]
+    assert sig.p_long == pytest.approx(0.5)  # 0.8 / 1.6
+    assert sig.p_long + sig.p_short + sig.p_flat == pytest.approx(1.0)
+    assert sig.direction == Direction.LONG
+
+
+def test_mock_agent_probs_consistent_with_direction() -> None:
+    from arena.agents.mock import MockAgent
+
+    agent = MockAgent(AgentSpec(name="m", provider="mock", seed=7))
+    for sig in agent.generate_signals(make_snapshot()):
+        assert sig.has_probs
+        probs = {
+            Direction.LONG: sig.p_long,
+            Direction.SHORT: sig.p_short,
+            Direction.FLAT: sig.p_flat,
+        }
+        assert sum(probs.values()) == pytest.approx(1.0, abs=1e-4)
+        assert max(probs, key=probs.get) == sig.direction

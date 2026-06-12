@@ -44,13 +44,15 @@ Task: for EACH coin above, predict the price direction over the next {horizon_ho
 - SHORT = you expect the price to fall meaningfully.
 - FLAT  = you expect no meaningful move (or you are unsure).
 
+A move bigger than +1% counts as LONG, below -1% counts as SHORT, in between is FLAT.
+
 Respond with STRICT JSON only — no prose, no markdown fences, exactly this shape:
-{{"signals": [{{"symbol": "BTC", "direction": "LONG|SHORT|FLAT", "confidence": 0.0, "rationale": "..."}}, ...]}}
+{{"signals": [{{"symbol": "BTC", "p_long": 0.0, "p_short": 0.0, "p_flat": 0.0, "rationale": "..."}}, ...]}}
 
 Rules:
 - Exactly one entry per coin, covering every symbol: {symbols}.
-- "direction" must be one of LONG, SHORT, FLAT.
-- "confidence" is a number between 0.0 and 1.0.
+- "p_long", "p_short", "p_flat" are your honest probabilities for each outcome; they must sum to 1.0.
+- You are scored with a strictly proper rule (Brier): reporting your true probabilities maximizes your expected score; overconfidence is punished.
 - "rationale" is a brief (max ~20 words) justification.
 """
 
@@ -78,6 +80,36 @@ def _clamp(value: Any) -> float:
     if conf != conf:  # NaN
         return 0.0
     return max(0.0, min(1.0, conf))
+
+
+def _extract_probs(entry: dict[str, Any]) -> Optional[tuple[float, float, float]]:
+    """Pull a normalized (p_long, p_short, p_flat) vector from an entry.
+
+    Returns None when the entry doesn't carry all three probability keys
+    (legacy direction+confidence shape) or when the vector is degenerate.
+    """
+    if not all(k in entry for k in ("p_long", "p_short", "p_flat")):
+        return None
+    p = [_clamp(entry.get(k)) for k in ("p_long", "p_short", "p_flat")]
+    total = sum(p)
+    if total <= 0:
+        return None
+    return p[0] / total, p[1] / total, p[2] / total
+
+
+def _argmax_direction(p_long: float, p_short: float, p_flat: float) -> Direction:
+    """Direction with the highest probability; exact ties fall back to FLAT."""
+    best = max(p_long, p_short, p_flat)
+    leaders = [
+        d
+        for d, p in (
+            (Direction.LONG, p_long),
+            (Direction.SHORT, p_short),
+            (Direction.FLAT, p_flat),
+        )
+        if p == best
+    ]
+    return leaders[0] if len(leaders) == 1 else Direction.FLAT
 
 
 def _flat_signal(agent_name: str, symbol: str, price: float) -> Signal:
@@ -112,6 +144,24 @@ def parse_signals(text: str, agent_name: str, snapshot: MarketSnapshot) -> list[
             symbol = str(entry.get("symbol", "")).upper().strip()
             if symbol not in prices:
                 continue  # unknown symbol — drop
+            rationale = str(entry.get("rationale", "") or "")
+            probs = _extract_probs(entry)
+            if probs is not None:
+                p_long, p_short, p_flat = probs
+                direction = _argmax_direction(p_long, p_short, p_flat)
+                parsed[symbol] = Signal(
+                    agent=agent_name,
+                    symbol=symbol,
+                    direction=direction,
+                    confidence=max(p_long, p_short, p_flat),
+                    rationale=rationale,
+                    price_at_signal=prices[symbol],
+                    p_long=p_long,
+                    p_short=p_short,
+                    p_flat=p_flat,
+                )
+                continue
+            # Legacy shape: explicit direction + confidence.
             raw_dir = str(entry.get("direction", "")).upper().strip()
             try:
                 direction = Direction(raw_dir)
@@ -122,7 +172,7 @@ def parse_signals(text: str, agent_name: str, snapshot: MarketSnapshot) -> list[
                 symbol=symbol,
                 direction=direction,
                 confidence=_clamp(entry.get("confidence")),
-                rationale=str(entry.get("rationale", "") or ""),
+                rationale=rationale,
                 price_at_signal=prices[symbol],
             )
 

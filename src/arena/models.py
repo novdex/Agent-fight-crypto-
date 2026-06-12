@@ -53,7 +53,14 @@ class MarketSnapshot(BaseModel):
 
 
 class Signal(BaseModel):
-    """One agent's call on one coin for the round's horizon."""
+    """One agent's call on one coin for the round's horizon.
+
+    Agents may optionally provide a full probability vector over outcomes
+    (``p_long``/``p_short``/``p_flat``, summing to ~1). When present, the
+    engine scores the signal with the strictly proper Brier rule instead of
+    the legacy confidence×tanh rule, which makes honest probability reporting
+    the optimal strategy (Gneiting & Raftery 2007).
+    """
 
     agent: str
     symbol: str
@@ -61,6 +68,13 @@ class Signal(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str = ""
     price_at_signal: float
+    p_long: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    p_short: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    p_flat: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+    @property
+    def has_probs(self) -> bool:
+        return None not in (self.p_long, self.p_short, self.p_flat)
 
 
 class ScoredSignal(Signal):
@@ -85,10 +99,12 @@ class RoundStatus(str, Enum):
 class ArenaSettings(BaseModel):
     top_n_coins: int = 20
     horizon_hours: float = 24.0
-    eta: float = 0.35  # weight-update learning rate
+    eta: float = 0.35  # weight-update learning rate (used when adaptive_eta is off)
+    adaptive_eta: bool = True  # eta(t) = sqrt(ln N / t), anytime-optimal Hedge
     min_weight: float = 0.05
     max_weight: float = 0.60
     flat_threshold_pct: float = 1.0  # |move| below this rewards FLAT calls
+    fee_rate_bps: float = 5.0  # taker fee per side, basis points (paper PnL)
     db_path: str = "arena.db"
     start_equity: float = 10_000.0  # paper-trading starting equity per agent
 

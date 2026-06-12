@@ -22,6 +22,11 @@ class MockAgent(BaseAgent):
             # Map two digest bytes onto [0.3, 0.95].
             frac = int.from_bytes(digest[1:3], "big") / 0xFFFF
             confidence = round(0.3 + frac * 0.65, 4)
+            # Probability vector consistent with the picked direction:
+            # p_dir = (1 + 2c) / 3 in [0.53, 0.97] so argmax always matches.
+            p_dir = (1.0 + 2.0 * confidence) / 3.0
+            p_rest = (1.0 - p_dir) / 2.0
+            probs = {d: (p_dir if d == direction else p_rest) for d in _DIRECTIONS}
             signals.append(
                 Signal(
                     agent=self.name,
@@ -30,6 +35,9 @@ class MockAgent(BaseAgent):
                     confidence=confidence,
                     rationale=f"mock deterministic signal (seed={seed})",
                     price_at_signal=coin.price_usd,
+                    p_long=round(probs[Direction.LONG], 6),
+                    p_short=round(probs[Direction.SHORT], 6),
+                    p_flat=round(probs[Direction.FLAT], 6),
                 )
             )
         return signals

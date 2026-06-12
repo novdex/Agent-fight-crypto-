@@ -31,7 +31,10 @@ CREATE TABLE IF NOT EXISTS signals (
     rationale TEXT,
     price_at_signal REAL,
     price_at_eval REAL NULL,
-    score REAL NULL
+    score REAL NULL,
+    p_long REAL NULL,
+    p_short REAL NULL,
+    p_flat REAL NULL
 );
 CREATE TABLE IF NOT EXISTS round_scores (
     round_id INTEGER,
@@ -77,6 +80,18 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         with self._conn:
             self._conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the original schema to older DBs."""
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(signals)").fetchall()
+        }
+        with self._conn:
+            for col in ("p_long", "p_short", "p_flat"):
+                if col not in existing:
+                    self._conn.execute(f"ALTER TABLE signals ADD COLUMN {col} REAL NULL")
 
     def close(self) -> None:
         self._conn.close()
@@ -100,8 +115,9 @@ class Store:
         with self._conn:
             self._conn.executemany(
                 "INSERT INTO signals "
-                "(round_id, agent, symbol, direction, confidence, rationale, price_at_signal) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(round_id, agent, symbol, direction, confidence, rationale, "
+                " price_at_signal, p_long, p_short, p_flat) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         round_id,
@@ -111,6 +127,9 @@ class Store:
                         s.confidence,
                         s.rationale,
                         s.price_at_signal,
+                        s.p_long,
+                        s.p_short,
+                        s.p_flat,
                     )
                     for s in signals
                 ],
@@ -138,7 +157,8 @@ class Store:
 
     def signals_for_round(self, round_id: int) -> list[Signal]:
         rows = self._conn.execute(
-            "SELECT agent, symbol, direction, confidence, rationale, price_at_signal "
+            "SELECT agent, symbol, direction, confidence, rationale, price_at_signal, "
+            "p_long, p_short, p_flat "
             "FROM signals WHERE round_id = ? ORDER BY rowid",
             (round_id,),
         ).fetchall()
@@ -150,9 +170,20 @@ class Store:
                 confidence=row["confidence"],
                 rationale=row["rationale"],
                 price_at_signal=row["price_at_signal"],
+                p_long=row["p_long"],
+                p_short=row["p_short"],
+                p_flat=row["p_flat"],
             )
             for row in rows
         ]
+
+    def evaluated_rounds_count(self) -> int:
+        """Number of rounds already EVALUATED (drives the adaptive eta schedule)."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM rounds WHERE status = ?",
+            (RoundStatus.EVALUATED.value,),
+        ).fetchone()
+        return int(row["n"])
 
     def record_scores(
         self,

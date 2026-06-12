@@ -5,10 +5,12 @@
 arena:
   top_n_coins: 20
   horizon_hours: 24        # how long until a round's signals are evaluated
-  eta: 0.35                # weight-update learning rate (higher = faster power shifts)
+  adaptive_eta: true       # eta(t) = sqrt(ln N / t) — optimal Hedge schedule
+  eta: 0.35                # fixed learning rate, used only when adaptive_eta is false
   min_weight: 0.05         # no agent's power ever drops below this share
   max_weight: 0.60         # ...or rises above this share
   flat_threshold_pct: 1.0  # moves smaller than this count as "flat"
+  fee_rate_bps: 5          # taker fee per side (paper PnL realism)
   db_path: arena.db
   start_equity: 10000      # paper-trading starting equity per agent
 

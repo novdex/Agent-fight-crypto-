@@ -55,6 +55,7 @@ class Fakes:
         self.stores: list[Any] = []
         self.update_weights_calls: list[dict[str, Any]] = []
         self.score_calls: list[tuple[Signal, float]] = []
+        self.adaptive_eta_calls: list[tuple[int, int]] = []
 
 
 class FakeAgent:
@@ -89,6 +90,9 @@ def _make_fake_store_cls(fakes: Fakes) -> type:
 
         def add_signals(self, round_id: int, signals: list[Signal]) -> None:
             self.added_signals[round_id] = list(signals)
+
+        def evaluated_rounds_count(self) -> int:
+            return len(self.recorded)
 
         def pending_rounds(self, now: datetime, *, force: bool = False) -> list[dict[str, Any]]:
             assert now.tzinfo is not None  # CLI must pass aware UTC datetimes
@@ -196,16 +200,25 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
             for sym, price in sorted(symbols.items())
         ]
 
+    def adaptive_eta(round_index: int, n_agents: int) -> float:
+        holder.adaptive_eta_calls.append((round_index, n_agents))
+        return 0.777
+
     engine_mod.score_signal = score_signal  # type: ignore[attr-defined]
     engine_mod.update_weights = update_weights  # type: ignore[attr-defined]
     engine_mod.consensus_signals = consensus_signals  # type: ignore[attr-defined]
+    engine_mod.adaptive_eta = adaptive_eta  # type: ignore[attr-defined]
 
     # --- arena.store --------------------------------------------------------
     store_mod = types.ModuleType("arena.store")
     store_mod.Store = _make_fake_store_cls(holder)  # type: ignore[attr-defined]
 
     def apply_round_to_equity(
-        equity: float, scored: list[Any], *, stake_fraction: float = 0.5
+        equity: float,
+        scored: list[Any],
+        *,
+        stake_fraction: float = 0.5,
+        fee_rate: float = 0.0,
     ) -> float:
         return equity + 100.0
 
@@ -390,7 +403,9 @@ def test_evaluate_scores_round_and_updates_weights(
     assert len(fakes.update_weights_calls) == 1
     call = fakes.update_weights_calls[0]
     assert set(call["agent_scores"]) == {"claude", "gpt"}
-    assert call["eta"] == pytest.approx(0.35)
+    # adaptive eta (default on): cli asked the fake schedule and used its value
+    assert fakes.adaptive_eta_calls == [(1, 2)]  # 1st evaluated round, 2 competitors
+    assert call["eta"] == pytest.approx(0.777)
     assert call["min_weight"] == pytest.approx(0.05)
     assert call["max_weight"] == pytest.approx(0.60)
     assert store.weights_set == [{"claude": 0.123, "gpt": 0.123}]

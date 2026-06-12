@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from arena.engine import (
     consensus_signals,
     equal_weights,
@@ -347,3 +349,88 @@ class TestConsensusSignals:
         out = consensus_signals(signals, equal_weights(["a", "b"]))
         assert 0.0 <= out[0].confidence <= 1.0
         assert math.isclose(out[0].confidence, 1.0, rel_tol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Brier scoring (probability-vector signals) & adaptive eta
+# ---------------------------------------------------------------------------
+
+
+def _prob_signal(p_long: float, p_short: float, p_flat: float) -> Signal:
+    from arena.agents import __name__ as _  # noqa: F401 - no agents import needed
+    return Signal(
+        agent="a",
+        symbol="BTC",
+        direction=Direction.LONG,
+        confidence=max(p_long, p_short, p_flat),
+        price_at_signal=100.0,
+        p_long=p_long,
+        p_short=p_short,
+        p_flat=p_flat,
+    )
+
+
+def test_realized_class_thresholds() -> None:
+    from arena.engine import realized_class
+
+    assert realized_class(2.0, 1.0) == Direction.LONG
+    assert realized_class(-2.0, 1.0) == Direction.SHORT
+    assert realized_class(0.5, 1.0) == Direction.FLAT
+    assert realized_class(-0.5, 1.0) == Direction.FLAT
+
+
+def test_brier_perfect_confident_call_scores_one() -> None:
+    sig = _prob_signal(1.0, 0.0, 0.0)
+    assert score_signal(sig, 105.0) == pytest.approx(1.0)  # +5% -> LONG outcome
+
+
+def test_brier_confident_miss_scores_minus_one() -> None:
+    sig = _prob_signal(1.0, 0.0, 0.0)
+    assert score_signal(sig, 95.0) == pytest.approx(-1.0)  # -5% -> SHORT outcome
+
+
+def test_brier_uniform_forecast_scores_one_third() -> None:
+    third = 1.0 / 3.0
+    sig = _prob_signal(third, third, third)
+    assert score_signal(sig, 105.0) == pytest.approx(1.0 / 3.0)
+
+
+def test_brier_honest_beats_overconfident_in_expectation() -> None:
+    # True distribution: P(LONG)=0.6, P(SHORT)=0.4. Honest report must have
+    # higher expected score than an overconfident 0.99/0.01 report.
+    honest = _prob_signal(0.6, 0.4, 0.0)
+    overconfident = _prob_signal(0.99, 0.01, 0.0)
+
+    def expected(sig: Signal) -> float:
+        up = score_signal(sig, 105.0)  # LONG outcome
+        down = score_signal(sig, 95.0)  # SHORT outcome
+        return 0.6 * up + 0.4 * down
+
+    assert expected(honest) > expected(overconfident)
+
+
+def test_brier_normalizes_sloppy_vectors() -> None:
+    sig = _prob_signal(0.8, 0.4, 0.0)  # sums to 1.2 -> normalized internally
+    assert -1.0 <= score_signal(sig, 105.0) <= 1.0
+
+
+def test_signals_without_probs_keep_legacy_tanh_score() -> None:
+    legacy = Signal(
+        agent="a", symbol="BTC", direction=Direction.LONG,
+        confidence=0.8, price_at_signal=100.0,
+    )
+    import math
+
+    expected = 0.8 * math.tanh(5.0 / 5.0)
+    assert score_signal(legacy, 105.0) == pytest.approx(expected)
+
+
+def test_adaptive_eta_schedule() -> None:
+    import math
+
+    from arena.engine import adaptive_eta
+
+    assert adaptive_eta(1, 4) == pytest.approx(math.sqrt(math.log(4)))
+    assert adaptive_eta(100, 4) == pytest.approx(math.sqrt(math.log(4) / 100))
+    assert adaptive_eta(4, 4) < adaptive_eta(1, 4)  # decays over time
+    assert adaptive_eta(0, 1) > 0  # degenerate inputs stay positive

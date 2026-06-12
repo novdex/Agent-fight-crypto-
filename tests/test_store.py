@@ -307,3 +307,49 @@ def test_apply_round_to_equity_all_flat_unchanged() -> None:
     ]
     assert apply_round_to_equity(10_000.0, scored) == 10_000.0
     assert apply_round_to_equity(10_000.0, []) == 10_000.0
+
+
+def test_signals_probability_vector_round_trip(tmp_path) -> None:
+    store = Store(str(tmp_path / "probs.db"))
+    rid = store.create_round(datetime(2026, 6, 12, tzinfo=timezone.utc), 24.0)
+    sig = Signal(
+        agent="a", symbol="BTC", direction=Direction.LONG, confidence=0.7,
+        price_at_signal=100.0, p_long=0.7, p_short=0.2, p_flat=0.1,
+    )
+    legacy = Signal(
+        agent="b", symbol="BTC", direction=Direction.SHORT, confidence=0.4,
+        price_at_signal=100.0,
+    )
+    store.add_signals(rid, [sig, legacy])
+    loaded = {s.agent: s for s in store.signals_for_round(rid)}
+    assert loaded["a"].p_long == 0.7 and loaded["a"].has_probs
+    assert loaded["b"].p_long is None and not loaded["b"].has_probs
+    store.close()
+
+
+def test_evaluated_rounds_count(tmp_path) -> None:
+    store = Store(str(tmp_path / "count.db"))
+    assert store.evaluated_rounds_count() == 0
+    rid = store.create_round(datetime(2026, 6, 12, tzinfo=timezone.utc), 24.0)
+    sig = Signal(
+        agent="a", symbol="BTC", direction=Direction.LONG, confidence=0.5,
+        price_at_signal=100.0,
+    )
+    store.add_signals(rid, [sig])
+    assert store.evaluated_rounds_count() == 0  # still pending
+    scored = ScoredSignal(**sig.model_dump(), price_at_eval=101.0, score=0.1)
+    store.record_scores(rid, [scored], {"a": 0.1})
+    assert store.evaluated_rounds_count() == 1
+    store.close()
+
+
+def test_paper_trading_fees_deducted(tmp_path) -> None:
+    # One LONG position, +10% move, 50% stake, 5 bps/side fees:
+    # pnl = 5000 * 0.10 - 2 * 0.0005 * 5000 = 500 - 5 = 495
+    sig = ScoredSignal(
+        agent="a", symbol="BTC", direction=Direction.LONG, confidence=0.9,
+        price_at_signal=100.0, price_at_eval=110.0, score=0.5,
+    )
+    assert apply_round_to_equity(10_000.0, [sig], fee_rate=0.0005) == pytest.approx(10_495.0)
+    # fee-free default keeps the original behavior
+    assert apply_round_to_equity(10_000.0, [sig]) == pytest.approx(10_500.0)

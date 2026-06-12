@@ -146,7 +146,7 @@ def cmd_run_round(args: argparse.Namespace) -> int:
 def cmd_evaluate(args: argparse.Namespace) -> int:
     """Score every due round, update decision power and paper equity."""
     from arena.data import fetch_prices
-    from arena.engine import score_signal, update_weights
+    from arena.engine import adaptive_eta, score_signal, update_weights
     from arena.store import Store, apply_round_to_equity
 
     console = _console()
@@ -202,20 +202,27 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             # Consensus is derived: it never competes for decision power.
             competitor_scores = {k: v for k, v in round_scores.items() if k != "consensus"}
             old_weights = store.get_weights(sorted(competitor_scores))
+            if settings.adaptive_eta:
+                # record_scores already marked this round EVALUATED, so the
+                # count is the 1-based index of the current round.
+                eta = adaptive_eta(store.evaluated_rounds_count(), len(competitor_scores))
+            else:
+                eta = settings.eta
             new_weights = update_weights(
                 old_weights,
                 competitor_scores,
-                eta=settings.eta,
+                eta=eta,
                 min_weight=settings.min_weight,
                 max_weight=settings.max_weight,
             )
             store.set_weights(new_weights)
 
             # Paper equity: every agent *including* consensus trades its book.
+            fee_rate = settings.fee_rate_bps / 10_000.0
             new_equity: dict[str, float] = {}
             for name, sigs in by_agent.items():
                 equity = store.get_equity(name, start_equity=settings.start_equity)
-                new_equity[name] = apply_round_to_equity(equity, sigs)
+                new_equity[name] = apply_round_to_equity(equity, sigs, fee_rate=fee_rate)
                 store.set_equity(name, new_equity[name])
 
             table = Table(title=f"Round {round_id} evaluated ({rnd.get('as_of', '')})")

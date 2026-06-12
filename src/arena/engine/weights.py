@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import math
 
-__all__ = ["equal_weights", "update_weights"]
+__all__ = ["adaptive_eta", "equal_weights", "update_weights"]
+
+
+def adaptive_eta(round_index: int, n_agents: int) -> float:
+    """Anytime-optimal Hedge learning rate: eta(t) = sqrt(ln N / t).
+
+    Large early updates while evidence is scarce, fine-grained adjustments as
+    the sample grows — the schedule that achieves the O(sqrt(T ln N)) regret
+    bound (Cesa-Bianchi & Lugosi 2006). ``round_index`` is 1-based.
+    """
+    t = max(round_index, 1)
+    n = max(n_agents, 2)
+    return math.sqrt(math.log(n) / t)
 
 
 def equal_weights(names: list[str]) -> dict[str, float]:
