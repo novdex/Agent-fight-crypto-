@@ -8,3 +8,4 @@ arena.db
 dist/
 build/
 .pytest_cache/
+.claude/worktrees/
