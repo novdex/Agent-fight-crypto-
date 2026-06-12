@@ -13,7 +13,11 @@ from arena.models import AgentSpec, MarketSnapshot, Signal
 class AnthropicAgent(BaseAgent):
     def __init__(self, spec: AgentSpec):
         super().__init__(spec)
-        self._client = anthropic.Anthropic(api_key=api_key_for(spec.api_key_env))
+        # The SDK retries 429/5xx with backoff on its own; cap request time so
+        # a hung connection can't eat the round's whole agent budget.
+        self._client = anthropic.Anthropic(
+            api_key=api_key_for(spec.api_key_env), timeout=240.0, max_retries=3
+        )
 
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
         prompt = build_prompt(snapshot)

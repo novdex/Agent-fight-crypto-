@@ -148,7 +148,7 @@ def test_parse_signals_drops_unknown_symbols() -> None:
 # ---------------------------------------------------------------- MockAgent
 
 
-def test_mock_agent_deterministic_samemake_snapshot() -> None:
+def test_mock_agent_deterministic_same_snapshot() -> None:
     snap = make_snapshot()
     agent = MockAgent(AgentSpec(name="m1", provider="mock", seed=42))
     first = agent.generate_signals(snap)
@@ -406,3 +406,81 @@ def test_mock_agent_probs_consistent_with_direction() -> None:
         }
         assert sum(probs.values()) == pytest.approx(1.0, abs=1e-4)
         assert max(probs, key=probs.get) == sig.direction
+
+
+def test_openai_compat_retries_transient_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 503 then a clean response: the agent retries instead of benching."""
+    import arena.agents.openai_compat as oc
+
+    calls: list[int] = []
+
+    class FakeResponse:
+        def __init__(self, status: int, payload: dict | None = None) -> None:
+            self.status_code = status
+            self._payload = payload or {}
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("boom", request=None, response=None)  # type: ignore[arg-type]
+
+        def json(self) -> dict:
+            return self._payload
+
+    ok_payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "signals": [
+                                {"symbol": "BTC", "p_long": 0.6, "p_short": 0.3, "p_flat": 0.1}
+                            ]
+                        }
+                    )
+                }
+            }
+        ]
+    }
+
+    def fake_post(url: str, **kwargs: object) -> FakeResponse:
+        calls.append(1)
+        return FakeResponse(503) if len(calls) == 1 else FakeResponse(200, ok_payload)
+
+    monkeypatch.setattr(oc.httpx, "post", fake_post)
+    monkeypatch.setattr(oc.time, "sleep", lambda s: None)
+
+    agent = OpenAICompatAgent(
+        AgentSpec(name="g", provider="openai_compat", base_url="https://x", model="m")
+    )
+    sigs = agent.generate_signals(make_snapshot())
+    assert len(calls) == 2  # one retry
+    assert {s.symbol: s.direction for s in sigs}["BTC"] == Direction.LONG
+
+
+def test_openai_compat_gives_up_after_max_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    import arena.agents.openai_compat as oc
+
+    calls: list[int] = []
+
+    class Always503:
+        status_code = 503
+
+        def raise_for_status(self) -> None:  # pragma: no cover - not reached
+            pass
+
+        def json(self) -> dict:  # pragma: no cover - not reached
+            return {}
+
+    def fake_post(url: str, **kwargs: object) -> Always503:
+        calls.append(1)
+        return Always503()
+
+    monkeypatch.setattr(oc.httpx, "post", fake_post)
+    monkeypatch.setattr(oc.time, "sleep", lambda s: None)
+
+    agent = OpenAICompatAgent(
+        AgentSpec(name="g", provider="openai_compat", base_url="https://x", model="m")
+    )
+    with pytest.raises(AgentError):
+        agent.generate_signals(make_snapshot())
+    assert len(calls) == 3

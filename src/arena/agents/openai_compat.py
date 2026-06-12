@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import httpx
 
 from arena.config import api_key_for
@@ -9,26 +11,58 @@ from arena.agents.base import AgentError, BaseAgent
 from arena.agents.prompts import build_prompt, parse_signals
 from arena.models import AgentSpec, MarketSnapshot, Signal
 
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+
 
 class OpenAICompatAgent(BaseAgent):
     def __init__(self, spec: AgentSpec):
         super().__init__(spec)
         self._api_key = api_key_for(spec.api_key_env)
 
+    def _post_with_retry(self, url: str, body: dict) -> httpx.Response:
+        """POST with exponential backoff on transient failures (httpx has no
+        built-in retries, unlike the Anthropic SDK)."""
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                response = httpx.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json=body,
+                    timeout=120.0,
+                )
+                if response.status_code in _RETRYABLE_STATUS:
+                    last_exc = AgentError(
+                        f"HTTP {response.status_code} from {url} for agent {self.name!r}"
+                    )
+                else:
+                    response.raise_for_status()
+                    return response
+            except httpx.TransportError as exc:  # connect/read/write failures
+                last_exc = exc
+            except httpx.HTTPStatusError as exc:  # non-retryable 4xx
+                raise AgentError(
+                    f"HTTP request failed for agent {self.name!r}: {exc}"
+                ) from exc
+            if attempt < _MAX_ATTEMPTS - 1:
+                time.sleep(2.0 ** (attempt + 1))  # 2s, 4s
+        raise AgentError(
+            f"HTTP request failed for agent {self.name!r} after "
+            f"{_MAX_ATTEMPTS} attempts: {last_exc}"
+        ) from last_exc
+
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
         prompt = build_prompt(snapshot)
         base_url = self.spec.base_url.rstrip("/")
         try:
-            response = httpx.post(
+            response = self._post_with_retry(
                 f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json={
+                {
                     "model": self.spec.model,
                     "messages": [{"role": "user", "content": prompt}],
                 },
-                timeout=120.0,
             )
-            response.raise_for_status()
             payload = response.json()
             text = payload["choices"][0]["message"]["content"]
         except httpx.HTTPError as exc:

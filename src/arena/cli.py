@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,6 +21,10 @@ from rich.console import Console
 from rich.table import Table
 
 from arena.models import ArenaConfig, Direction, ScoredSignal, Signal
+
+#: Hard wall-clock budget per agent per round (the providers' own HTTP
+#: timeouts are shorter; this is the safety net for anything hung).
+AGENT_TIMEOUT_S = 300.0
 
 _DIRECTION_STYLES: dict[Direction, str] = {
     Direction.LONG: "green",
@@ -94,19 +100,34 @@ def cmd_run_round(args: argparse.Namespace) -> int:
         err.print("[red]error:[/red] no agents available (missing API keys? try --mock).")
         return 1
 
+    # Query all fighters concurrently; one slow or broken agent must neither
+    # stall nor crash the round (it just sits this one out).
     signals_by_agent: dict[str, list[Signal]] = {}
-    for agent in agents:
-        try:
-            sigs = agent.generate_signals(snapshot)
-        except AgentError as exc:
-            err.print(
-                f"[yellow]warning:[/yellow] agent '{agent.name}' sits this round out: {exc}"
-            )
-            continue
-        if sigs:
-            signals_by_agent[agent.name] = sigs
-        else:
-            err.print(f"[yellow]warning:[/yellow] agent '{agent.name}' produced no signals.")
+    with ThreadPoolExecutor(max_workers=max(len(agents), 1)) as pool:
+        futures = [(agent, pool.submit(agent.generate_signals, snapshot)) for agent in agents]
+        for agent, future in futures:
+            try:
+                sigs = future.result(timeout=AGENT_TIMEOUT_S)
+            except AgentError as exc:
+                err.print(
+                    f"[yellow]warning:[/yellow] agent '{agent.name}' sits this round out: {exc}"
+                )
+                continue
+            except FutureTimeoutError:
+                err.print(
+                    f"[yellow]warning:[/yellow] agent '{agent.name}' timed out after "
+                    f"{AGENT_TIMEOUT_S:g}s; sits this round out."
+                )
+                continue
+            except Exception as exc:  # defensive: never let one agent kill the round
+                err.print(
+                    f"[yellow]warning:[/yellow] agent '{agent.name}' failed unexpectedly: {exc}"
+                )
+                continue
+            if sigs:
+                signals_by_agent[agent.name] = sigs
+            else:
+                err.print(f"[yellow]warning:[/yellow] agent '{agent.name}' produced no signals.")
 
     if len(signals_by_agent) < 2:
         err.print(
