@@ -1,0 +1,29 @@
+[project]
+name = "crypto-llm-arena"
+version = "0.1.0"
+description = "Multi-LLM crypto signal arena: 3-4 LLMs compete on top-20 coin signals; winners gain decision-making power."
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "rich>=13.7",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+arena = "arena.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

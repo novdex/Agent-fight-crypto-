@@ -1,0 +1,37 @@
+# Crypto LLM Arena configuration.
+# Each agent fights to produce the most accurate signals on the top-20 coins.
+# Winners gain weight ("decision power") in the consensus signal; losers lose it.
+
+arena:
+  top_n_coins: 20
+  horizon_hours: 24        # how long until a round's signals are evaluated
+  eta: 0.35                # weight-update learning rate (higher = faster power shifts)
+  min_weight: 0.05         # no agent's power ever drops below this share
+  max_weight: 0.60         # ...or rises above this share
+  flat_threshold_pct: 1.0  # moves smaller than this count as "flat"
+  db_path: arena.db
+  start_equity: 10000      # paper-trading starting equity per agent
+
+agents:
+  - name: claude
+    provider: anthropic
+    model: claude-opus-4-8
+    api_key_env: ANTHROPIC_API_KEY
+
+  - name: gpt
+    provider: openai_compat
+    base_url: https://api.openai.com/v1
+    model: gpt-5
+    api_key_env: OPENAI_API_KEY
+
+  - name: gemini
+    provider: openai_compat
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-2.5-pro
+    api_key_env: GEMINI_API_KEY
+
+  - name: grok
+    provider: openai_compat
+    base_url: https://api.x.ai/v1
+    model: grok-4
+    api_key_env: XAI_API_KEY
