@@ -34,11 +34,19 @@ class CoinSnapshot(BaseModel):
     rsi_14: Optional[float] = None  # hourly RSI from 7d sparkline
     ema_20_dist_pct: Optional[float] = None  # % distance of price from 20-period EMA
     volatility_24h_pct: Optional[float] = None  # stdev of hourly returns * 100
+    # Perp-specific enrichment (None when the source is unavailable or the
+    # coin has no USDT perpetual) — see arena.data.perp.
+    funding_rate_pct: Optional[float] = None  # current funding, % per 8h
+    funding_7d_avg_pct: Optional[float] = None  # 7d mean funding, % per 8h
+    open_interest_usd: Optional[float] = None
+    long_short_ratio: Optional[float] = None  # global accounts long/short
+    adx_14: Optional[float] = None  # 1h ADX: >25 trending, <20 choppy
 
 
 class MarketSnapshot(BaseModel):
     as_of: datetime
     coins: list[CoinSnapshot]
+    fear_greed: Optional[int] = None  # market-wide Fear & Greed index (0-100)
 
     def coin(self, symbol: str) -> Optional[CoinSnapshot]:
         sym = symbol.upper()

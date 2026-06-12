@@ -95,6 +95,13 @@ def cmd_run_round(args: argparse.Namespace) -> int:
     settings = cfg.arena
 
     snapshot = fetch_top_coins(settings.top_n_coins, offline=args.offline)
+    if not args.offline:
+        try:
+            from arena.data.perp import enrich_snapshot
+
+            snapshot = enrich_snapshot(snapshot)
+        except Exception as exc:  # enrichment is best-effort, never blocking
+            err.print(f"[dim]perp enrichment skipped: {exc}[/dim]")
     agents = available_agents(cfg.agents, mock=args.mock)
     if not agents:
         err.print("[red]error:[/red] no agents available (missing API keys? try --mock).")

@@ -21,12 +21,36 @@ def _fmt(value: Optional[float], suffix: str = "") -> str:
 
 
 def _coin_line(c: CoinSnapshot) -> str:
-    return (
+    line = (
         f"- {c.symbol}: price=${c.price_usd:,.4f} | "
         f"1h={_fmt(c.change_1h_pct, '%')} 24h={_fmt(c.change_24h_pct, '%')} "
         f"7d={_fmt(c.change_7d_pct, '%')} | RSI14={_fmt(c.rsi_14)} | "
         f"EMA20dist={_fmt(c.ema_20_dist_pct, '%')} | vol24h={_fmt(c.volatility_24h_pct, '%')}"
     )
+    perp_bits = []
+    if c.funding_rate_pct is not None:
+        perp_bits.append(f"funding8h={c.funding_rate_pct:+.4f}%")
+    if c.funding_7d_avg_pct is not None:
+        perp_bits.append(f"funding7dAvg={c.funding_7d_avg_pct:+.4f}%")
+    if c.open_interest_usd is not None:
+        perp_bits.append(f"OI=${c.open_interest_usd / 1e6:,.0f}M")
+    if c.long_short_ratio is not None:
+        perp_bits.append(f"longShortAcct={c.long_short_ratio:.2f}")
+    if c.adx_14 is not None:
+        perp_bits.append(f"ADX14(1h)={c.adx_14:.1f}")
+    if perp_bits:
+        line += " | " + " ".join(perp_bits)
+    return line
+
+
+_PERP_HINTS = """\
+Reading the perp data (when present):
+- Extreme funding (>+0.05% or <-0.05% per 8h) marks crowded leverage — a contrarian reversal setup.
+- Open interest expanding with the trend confirms it; OI rising while price stalls warns of reversal.
+- longShortAcct > ~2.3 (or < ~0.7) is an extreme positioning imbalance — squeeze fuel.
+- ADX14 > 25 = trending market (trust momentum); ADX14 < 20 = chop (favor mean-reversion/FLAT).
+- Fear & Greed extremes (<20 fear, >80 greed) tend to mean-revert within 1-2 days.
+"""
 
 
 def build_prompt(snapshot: MarketSnapshot) -> str:
@@ -34,10 +58,20 @@ def build_prompt(snapshot: MarketSnapshot) -> str:
     horizon_hours = ArenaSettings().horizon_hours
     coin_lines = "\n".join(_coin_line(c) for c in snapshot.coins)
     symbols = ", ".join(snapshot.symbols)
+    fg_line = (
+        f"\nMarket-wide Fear & Greed index: {snapshot.fear_greed}/100"
+        if snapshot.fear_greed is not None
+        else ""
+    )
+    has_perp = any(
+        c.funding_rate_pct is not None or c.adx_14 is not None for c in snapshot.coins
+    )
+    hints = f"\n{_PERP_HINTS}" if has_perp or snapshot.fear_greed is not None else ""
     return f"""You are a crypto trading-signal agent competing in an arena.
 
-Market snapshot as of {snapshot.as_of.isoformat()}:
+Market snapshot as of {snapshot.as_of.isoformat()}:{fg_line}
 {coin_lines}
+{hints}
 
 Task: for EACH coin above, predict the price direction over the next {horizon_hours:g} hours.
 - LONG  = you expect the price to rise meaningfully.
