@@ -102,10 +102,66 @@ def cmd_run_round(args: argparse.Namespace) -> int:
             snapshot = enrich_snapshot(snapshot)
         except Exception as exc:  # enrichment is best-effort, never blocking
             err.print(f"[dim]perp enrichment skipped: {exc}[/dim]")
+        for mod_name in ("micro", "macro", "onchain", "news"):
+            try:
+                import importlib
+
+                mod = importlib.import_module(f"arena.data.{mod_name}")
+                snapshot = getattr(mod, f"enrich_{mod_name}")(snapshot)
+            except Exception as exc:
+                err.print(f"[dim]{mod_name} enrichment skipped: {exc}[/dim]")
     agents = available_agents(cfg.agents, mock=args.mock)
     if not agents:
         err.print("[red]error:[/red] no agents available (missing API keys? try --mock).")
         return 1
+
+    # --- Wave-2 agent intelligence: debate brief + per-agent preambles -----
+    regime = "chop"
+    debate_brief = ""
+    try:
+        if cfg.debate.enabled and agents:
+            from arena.brain import debate_context
+
+            debate_brief = debate_context(snapshot, agents[0].ask)
+    except Exception as exc:
+        err.print(f"[dim]debate skipped: {exc}[/dim]")
+    try:
+        from arena.agents.personas import persona_preamble
+        from arena.agents.promptkit import (
+            chart_pattern_notes,
+            detect_regime,
+            fact_subjectivity_split,
+            fincot_blueprint,
+            regime_demos,
+        )
+        from arena.brain import AgentMemory, PromptVariantBook
+
+        regime = detect_regime(snapshot)
+        shared = "\n\n".join(
+            part
+            for part in (
+                fincot_blueprint(snapshot),
+                fact_subjectivity_split(),
+                chart_pattern_notes(snapshot),
+                regime_demos(regime),
+                debate_brief,
+            )
+            if part
+        )
+        book = PromptVariantBook(cfg.memory.path)
+        for agent in agents:
+            parts = [
+                persona_preamble(getattr(agent.spec, "role", "generalist")),
+                book.preamble_for(agent.name),
+                shared,
+            ]
+            if cfg.memory.enabled:
+                lessons = AgentMemory(cfg.memory.path, agent.name).lessons()
+                if lessons:
+                    parts.append("LESSONS FROM PAST ROUNDS:\n- " + "\n- ".join(lessons))
+            agent.prompt_preamble = "\n\n".join(p for p in parts if p) + "\n\n"
+    except Exception as exc:
+        err.print(f"[dim]prompt enhancement skipped: {exc}[/dim]")
 
     # Query all fighters concurrently; one slow or broken agent must neither
     # stall nor crash the round (it just sits this one out).
@@ -143,18 +199,118 @@ def cmd_run_round(args: argparse.Namespace) -> int:
         )
         return 1
 
-    store = Store(_db_path(args, cfg))
+    # Deterministic critic pass: attenuate rationale-vs-data contradictions.
+    if cfg.debate.critic:
+        try:
+            from arena.brain import critic_review
+
+            signals_by_agent = {
+                name: critic_review(sigs, snapshot)
+                for name, sigs in signals_by_agent.items()
+            }
+        except Exception as exc:
+            err.print(f"[dim]critic skipped: {exc}[/dim]")
+
+    db_path = _db_path(args, cfg)
+    store = Store(db_path)
     try:
+        # Per-agent probability calibration + early-rounds damping.
+        if cfg.calibration.enabled:
+            try:
+                from arena.engine.calibration import CalibrationLog, Calibrator, early_damping
+
+                rounds_seen = store.evaluated_rounds_count()
+                clog = CalibrationLog(db_path)
+                for name, sigs in signals_by_agent.items():
+                    cal = Calibrator(cfg.calibration.method)
+                    cal.fit(clog.history(name, window=200))
+                    signals_by_agent[name] = [
+                        early_damping(
+                            cal.calibrate_signal(s),
+                            rounds_seen,
+                            threshold=cfg.calibration.early_damping_rounds,
+                        )
+                        for s in sigs
+                    ]
+                clog.close()
+            except Exception as exc:
+                err.print(f"[dim]calibration skipped: {exc}[/dim]")
+
         weights = store.get_weights(sorted(signals_by_agent))
-        consensus = consensus_signals(signals_by_agent, weights)
+        consensus: list[Signal]
+        try:
+            from arena.engine.consensus2 import consensus_signals_v2, no_trade_gate
+
+            per_asset = None
+            if cfg.weights.per_asset:
+                from arena.engine.weights2 import regime_key
+                from arena.store.weights_ext import WeightMatrixStore
+
+                book = regime_key(regime) if cfg.weights.regime_conditional else "global"
+                wms = WeightMatrixStore(db_path)
+                per_asset = wms.get(
+                    book, [c.symbol for c in snapshot.coins], sorted(signals_by_agent)
+                )
+                wms.close()
+            consensus, gated = no_trade_gate(
+                consensus_signals_v2(
+                    signals_by_agent,
+                    weights,
+                    settings=cfg.consensus,
+                    per_asset_weights=per_asset,
+                ),
+                cfg.consensus.no_trade_min_confidence,
+            )
+            if gated:
+                err.print(
+                    "[yellow]no-trade gate:[/yellow] aggregate conviction below "
+                    "threshold; round stored all-FLAT."
+                )
+        except Exception as exc:
+            err.print(f"[dim]consensus v2 unavailable ({exc}); using v1.[/dim]")
+            consensus = consensus_signals(signals_by_agent, weights)
+
         round_id = store.create_round(snapshot.as_of, settings.horizon_hours)
         all_signals: list[Signal] = [
             sig for name in sorted(signals_by_agent) for sig in signals_by_agent[name]
         ]
         all_signals.extend(consensus)
         store.add_signals(round_id, all_signals)
+
+        # Journal: exact snapshot + raw replies + token usage (audit/replay).
+        if cfg.ops.journal:
+            try:
+                from arena.ops import config_hash
+                from arena.store.journal import Journal
+
+                journal = Journal(db_path)
+                journal.record_snapshot(round_id, snapshot, config_hash(args.config))
+                for agent in agents:
+                    raw = getattr(agent, "last_raw", "")
+                    usage = getattr(agent, "last_usage", {}) or {}
+                    if raw:
+                        journal.record_reply(
+                            round_id,
+                            agent.name,
+                            raw,
+                            int(usage.get("input_tokens", 0) or 0),
+                            int(usage.get("output_tokens", 0) or 0),
+                        )
+                journal.close()
+            except Exception as exc:
+                err.print(f"[dim]journal skipped: {exc}[/dim]")
     finally:
         store.close()
+
+    try:
+        from arena.ops import send_alert
+
+        send_alert(
+            f"Arena round {round_id}: {len(signals_by_agent)} agents, regime={regime}",
+            ops=cfg.ops,
+        )
+    except Exception:
+        pass
 
     console.print(_signals_table(round_id, all_signals))
     console.print(
@@ -226,6 +382,24 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 name: sum(s.score for s in sigs) / len(sigs) for name, sigs in by_agent.items()
             }
             store.record_scores(round_id, scored, round_scores)
+            db_path = _db_path(args, cfg)
+
+            # Calibration log: stated confidence vs realized outcome.
+            if cfg.calibration.enabled:
+                try:
+                    from arena.engine.calibration import CalibrationLog
+                    from arena.engine.scoring import realized_class, realized_return_pct
+
+                    clog = CalibrationLog(db_path)
+                    for sc in scored:
+                        if sc.agent == "consensus":
+                            continue
+                        r = realized_return_pct(sc.price_at_signal, sc.price_at_eval)
+                        hit = sc.direction == realized_class(r, settings.flat_threshold_pct)
+                        clog.add(sc.agent, sc.confidence, hit, round_id)
+                    clog.close()
+                except Exception as exc:
+                    err.print(f"[dim]calibration log skipped: {exc}[/dim]")
 
             # Consensus is derived: it never competes for decision power.
             competitor_scores = {k: v for k, v in round_scores.items() if k != "consensus"}
@@ -243,15 +417,148 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 min_weight=settings.min_weight,
                 max_weight=settings.max_weight,
             )
+            # Statistical guards: damp young weight moves, watch diversity.
+            try:
+                from arena.engine.weights2 import (
+                    effective_sample_size,
+                    significance_damping,
+                )
+
+                new_weights = significance_damping(
+                    new_weights,
+                    old_weights,
+                    store.evaluated_rounds_count(),
+                    cfg.weights.significance_rounds,
+                )
+                ess = effective_sample_size(new_weights)
+                if ess < cfg.weights.ess_floor:
+                    err.print(
+                        f"[yellow]warning:[/yellow] ensemble diversity collapsed "
+                        f"(ESS {ess:.2f} < {cfg.weights.ess_floor}); one brain dominates."
+                    )
+            except Exception as exc:
+                err.print(f"[dim]weight guards skipped: {exc}[/dim]")
             store.set_weights(new_weights)
 
-            # Paper equity: every agent *including* consensus trades its book.
+            # Per-asset (and regime) decision-power books.
+            if cfg.weights.per_asset:
+                try:
+                    from arena.engine.weights2 import regime_key, update_weight_matrix
+                    from arena.store.weights_ext import WeightMatrixStore
+
+                    coin_scores: dict[str, dict[str, float]] = {}
+                    for sc in scored:
+                        if sc.agent != "consensus" and sc.score is not None:
+                            coin_scores.setdefault(sc.symbol, {})[sc.agent] = sc.score
+                    books = ["global"]
+                    if cfg.weights.regime_conditional:
+                        try:
+                            from arena.agents.promptkit import detect_regime
+                            from arena.store.journal import Journal
+
+                            journal = Journal(db_path)
+                            snap = journal.snapshot_for_round(round_id)
+                            journal.close()
+                            if snap is not None:
+                                books.append(regime_key(detect_regime(snap)))
+                        except Exception:
+                            pass
+                    agents_list = sorted(competitor_scores)
+                    coins = sorted(coin_scores)
+                    wms = WeightMatrixStore(db_path)
+                    for book in books:
+                        matrix = wms.get(book, coins, agents_list)
+                        matrix = update_weight_matrix(
+                            matrix,
+                            coin_scores,
+                            eta=eta,
+                            min_weight=settings.min_weight,
+                            max_weight=settings.max_weight,
+                            clip_low=cfg.weights.clip_factor_low,
+                            clip_high=cfg.weights.clip_factor_high,
+                        )
+                        wms.set(book, matrix)
+                    wms.close()
+                except Exception as exc:
+                    err.print(f"[dim]per-asset weights skipped: {exc}[/dim]")
+
+            # Funding rates from the journaled snapshot (funding-aware PnL).
+            funding_by_symbol = None
+            if cfg.risk.funding_in_pnl and cfg.ops.journal:
+                try:
+                    from arena.store.journal import Journal
+
+                    journal = Journal(db_path)
+                    snap = journal.snapshot_for_round(round_id)
+                    journal.close()
+                    if snap is not None:
+                        funding_by_symbol = {
+                            c.symbol: c.funding_rate_pct
+                            for c in snap.coins
+                            if c.funding_rate_pct is not None
+                        }
+                except Exception:
+                    pass
+
+            # Paper equity: every agent *including* consensus trades its book,
+            # with Kelly sizing, fees, slippage, funding and stops (v2);
+            # legacy equal-stake fallback keeps the round alive on any error.
             fee_rate = settings.fee_rate_bps / 10_000.0
+            score_history: dict[str, list[float]] = {}
+            for row in store.history(limit=500):
+                score_history.setdefault(str(row.get("agent")), []).append(
+                    float(row.get("round_score", 0.0))
+                )
             new_equity: dict[str, float] = {}
             for name, sigs in by_agent.items():
                 equity = store.get_equity(name, start_equity=settings.start_equity)
-                new_equity[name] = apply_round_to_equity(equity, sigs, fee_rate=fee_rate)
+                try:
+                    from arena.risk import apply_round_to_equity_v2, position_fractions
+
+                    peak = max(equity, settings.start_equity)
+                    drawdown_pct = max(0.0, 100.0 * (peak - equity) / peak)
+                    fractions = position_fractions(
+                        {name: score_history.get(name, [])},
+                        list(sigs),
+                        equity,
+                        cfg.risk,
+                        drawdown_pct=drawdown_pct,
+                    )
+                    result = apply_round_to_equity_v2(
+                        equity,
+                        sigs,
+                        fractions=fractions,
+                        fee_rate=fee_rate,
+                        settings=cfg.risk,
+                        funding_by_symbol=funding_by_symbol,
+                        horizon_hours=float(rnd.get("horizon_hours", 24.0)),
+                    )
+                    new_equity[name] = result["equity"]
+                    if result["stopped"]:
+                        err.print(
+                            f"[dim]{name}: stops hit on {', '.join(result['stopped'])}[/dim]"
+                        )
+                except Exception as exc:
+                    err.print(f"[dim]risk pipeline fallback for {name}: {exc}[/dim]")
+                    new_equity[name] = apply_round_to_equity(equity, sigs, fee_rate=fee_rate)
                 store.set_equity(name, new_equity[name])
+
+            # Memory, reflection and prompt-variant feedback.
+            if cfg.memory.enabled:
+                try:
+                    from arena.brain import AgentMemory, PromptVariantBook
+
+                    book = PromptVariantBook(cfg.memory.path)
+                    for name, score in round_scores.items():
+                        if name == "consensus":
+                            continue
+                        mem = AgentMemory(cfg.memory.path, name)
+                        mem.record_round(
+                            round_id, score, mem.reflect(score, by_agent.get(name, []))
+                        )
+                        book.record_result(name, score)
+                except Exception as exc:
+                    err.print(f"[dim]memory update skipped: {exc}[/dim]")
 
             table = Table(title=f"Round {round_id} evaluated ({rnd.get('as_of', '')})")
             table.add_column("Agent", style="bold")
@@ -277,6 +584,15 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             console.print(table)
 
         console.print(f"Evaluated {len(due)} round(s).")
+        # Ops tail: rolling DB backup + round digest alert (both best-effort).
+        try:
+            from arena.ops import alert_round_summary, backup_db
+
+            if cfg.ops.backup_keep > 0:
+                backup_db(_db_path(args, cfg), keep=cfg.ops.backup_keep)
+            alert_round_summary(round_scores, new_weights, ops=cfg.ops)
+        except Exception:
+            pass
     finally:
         store.close()
     return 0
@@ -359,6 +675,128 @@ def cmd_history(args: argparse.Namespace) -> int:
             str(row.get("agent", "")),
             f"[{style}]{score:+.4f}[/{style}]",
         )
+    console.print(table)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# backtest / report / costs
+# ---------------------------------------------------------------------------
+
+
+def cmd_backtest(args: argparse.Namespace) -> int:
+    """Replay-backtest the arena on synthetic or journaled snapshots."""
+    from arena.agents import available_agents
+    from arena.backtest import ReplayBacktester, synthetic_snapshots
+
+    console = _console()
+    err = _err_console()
+    cfg = _load_config(args)
+    settings = cfg.arena
+
+    if args.from_journal:
+        from arena.store.journal import Journal
+
+        journal = Journal(_db_path(args, cfg))
+        snapshots = journal.snapshots()
+        journal.close()
+        if len(snapshots) < 2:
+            err.print("[red]error:[/red] need >= 2 journaled rounds; run more rounds first.")
+            return 1
+    else:
+        snapshots = synthetic_snapshots(args.rounds, args.coins, seed=args.seed)
+
+    # Backtests run deterministic mock agents (LLM replay would re-spend API
+    # budget and leak future knowledge through training cutoffs).
+    agents = available_agents(cfg.agents, mock=True)
+    result = ReplayBacktester(snapshots, agents).run(
+        flat_threshold_pct=settings.flat_threshold_pct,
+        fee_rate=settings.fee_rate_bps / 10_000.0,
+        eta_adaptive=settings.adaptive_eta,
+        eta=settings.eta,
+        min_weight=settings.min_weight,
+        max_weight=settings.max_weight,
+        start_equity=settings.start_equity,
+    )
+
+    table = Table(title=f"Backtest — {len(snapshots)} snapshots ({len(snapshots) - 1} rounds)")
+    table.add_column("Agent", style="bold")
+    table.add_column("Weight", justify="right")
+    table.add_column("Avg score", justify="right")
+    table.add_column("Sharpe", justify="right")
+    table.add_column("Equity", justify="right")
+    table.add_column("Regret", justify="right")
+    regret = result.get("regret", {})
+    for row in result["leaderboard"]:
+        name = row["agent"]
+        sharpe_v = row.get("sharpe")
+        table.add_row(
+            name,
+            f"{row['weight']:.1%}",
+            f"{row['avg_score']:+.4f}",
+            f"{sharpe_v:+.2f}" if sharpe_v is not None else "-",
+            f"${row['equity']:,.2f}",
+            f"{regret.get(name, 0.0):.3f}",
+        )
+    console.print(table)
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Emit the explainability report for one evaluated round (markdown)."""
+    from arena.backtest import round_report_markdown
+    from arena.store import Store
+
+    console = _console()
+    err = _err_console()
+    cfg = _load_config(args)
+    store = Store(_db_path(args, cfg))
+    try:
+        signals = store.signals_for_round(args.round)
+        if not signals:
+            err.print(f"[red]error:[/red] round {args.round} has no signals.")
+            return 1
+        round_scores = {
+            str(row["agent"]): float(row["round_score"])
+            for row in store.history(limit=10_000)
+            if int(row.get("round_id", -1)) == args.round
+        }
+        weights = store.get_weights(sorted({s.agent for s in signals if s.agent != "consensus"}))
+    finally:
+        store.close()
+    # Stored signals lack eval data fields when the round is pending — render
+    # what exists; scores appear once `arena evaluate` has run.
+    from arena.models import ScoredSignal
+
+    scored = [
+        s if isinstance(s, ScoredSignal) else ScoredSignal(
+            **s.model_dump(), price_at_eval=s.price_at_signal, score=0.0
+        )
+        for s in signals
+    ]
+    console.print(round_report_markdown(args.round, scored, round_scores, weights, weights))
+    return 0
+
+
+def cmd_costs(args: argparse.Namespace) -> int:
+    """Per-agent LLM spend from the journal (alpha per dollar matters)."""
+    from arena.store.journal import Journal
+
+    console = _console()
+    cfg = _load_config(args)
+    journal = Journal(_db_path(args, cfg))
+    try:
+        costs = journal.costs_by_agent()
+    finally:
+        journal.close()
+    if not costs:
+        console.print("No journaled replies yet.")
+        return 0
+    table = Table(title="LLM cost by agent")
+    table.add_column("Agent", style="bold")
+    table.add_column("Cost (USD)", justify="right")
+    for agent, cost in sorted(costs.items(), key=lambda kv: -kv[1]):
+        table.add_row(agent, f"${cost:,.4f}")
     console.print(table)
     return 0
 
@@ -464,6 +902,25 @@ def build_parser() -> argparse.ArgumentParser:
     _add_global_args(p_hist, suppress=True)
     p_hist.set_defaults(func=cmd_history)
 
+    p_bt = sub.add_parser("backtest", help="replay-backtest on synthetic or journaled data")
+    _add_global_args(p_bt, suppress=True)
+    p_bt.add_argument("--rounds", type=int, default=30, help="synthetic rounds (default 30)")
+    p_bt.add_argument("--coins", type=int, default=5, help="synthetic coins (default 5)")
+    p_bt.add_argument("--seed", type=int, default=0, help="synthetic data seed")
+    p_bt.add_argument(
+        "--from-journal", action="store_true", help="replay journaled snapshots instead"
+    )
+    p_bt.set_defaults(func=cmd_backtest)
+
+    p_rep = sub.add_parser("report", help="explainability report for one round (markdown)")
+    _add_global_args(p_rep, suppress=True)
+    p_rep.add_argument("--round", type=int, required=True, help="round id")
+    p_rep.set_defaults(func=cmd_report)
+
+    p_costs = sub.add_parser("costs", help="per-agent LLM spend from the journal")
+    _add_global_args(p_costs, suppress=True)
+    p_costs.set_defaults(func=cmd_costs)
+
     p_loop = sub.add_parser("loop", help="run forever: evaluate, run a round, sleep, repeat")
     _add_global_args(p_loop, suppress=True)
     p_loop.add_argument(
@@ -484,6 +941,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not hasattr(args, "func"):
         parser.print_help()
         return 2
+    try:
+        from arena.config import load_config
+        from arena.ops import setup_logging
+
+        setup_logging(json_mode=load_config(args.config).ops.json_logs)
+    except Exception:
+        pass
     return int(args.func(args))
 
 

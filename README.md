@@ -265,3 +265,46 @@ sudo -u arena /opt/crypto-llm-arena/.venv/bin/arena leaderboard
 This installs to `/opt/crypto-llm-arena` under a dedicated non-login `arena`
 user and runs `arena loop --interval-mins 60` as a systemd service
 (auto-restarts on failure, survives reboots via `systemctl enable`).
+
+## Wave 2 — the 100-improvements build-out
+
+The arena now implements the full pipeline from `docs/IMPROVEMENTS.md`
+(see `docs/INTERFACES2.md` for module contracts), all feature-gated in
+`config.yaml`:
+
+- **Agent intelligence** (`arena.brain`, `arena.agents.personas/promptkit`):
+  bull/bear debate briefs, a deterministic critic that attenuates
+  rationale-vs-data contradictions, per-agent layered memory with post-round
+  reflections, OPRO-lite prompt-variant optimization, role personas,
+  FinCoT expert-workflow scaffolds, fact-vs-narrative split, chart-pattern
+  notes and regime-matched few-shot demos.
+- **Calibration** (`arena.engine.calibration`): per-agent Platt/isotonic
+  calibration of stated probabilities, early-rounds damping, drift and
+  overconfidence flags, log-score option.
+- **Weights 2.0** (`arena.engine.weights2`): per-asset W[coin][agent] and
+  regime-conditional decision-power books, per-round update clipping,
+  significance damping while track records are young, bootstrap skill tests,
+  effective-sample-size diversity monitoring, decorrelation adjustments.
+- **Consensus 2.0** (`arena.engine.consensus2`): weighted probability-vector
+  pooling, Good-Judgment extremizing, herding haircut on unanimity, a
+  no-trade gate, optional LMSR prediction-market mechanism, confidence
+  intervals.
+- **Data wave 2** (`arena.data.*`): orderbook imbalance, taker buy/sell
+  ratio, basis, Deribit DVOL, BTC dominance, ETH/BTC, DXY/SPX context,
+  stablecoin supply, optional Glassnode MVRV/SOPR, headlines with event
+  tags, Hurst/MACD/Stoch-RSI/Bollinger/EMA-ribbon technicals.
+- **Risk** (`arena.risk`): fractional-Kelly sizing, vol targeting, per-coin
+  and leverage caps, liquidity screens, drawdown scaling, stop-loss /
+  take-profit, circuit breakers, pre-trade checks, slippage and funding-aware
+  perp PnL, market-neutral book construction.
+- **Backtesting** (`arena.backtest` + `arena backtest`): replay harness over
+  synthetic or journaled snapshots, Sharpe/Sortino/Calmar/deflated-Sharpe/
+  drawdown/profit-factor metrics, regret tracking, regime attribution,
+  round explainability reports (`arena report --round N`).
+- **Execution** (`arena.exchange`): connector abstraction with deterministic
+  paper fills, optional CCXT Binance-USDM/Bybit (testnet by default,
+  `pip install -e ".[live]"`), limit-then-market fallback, TWAP slicing.
+- **Ops** (`arena.ops`, `arena.store.journal`): provider-native structured
+  outputs, JSON logging, Telegram/Discord alerts, rolling DB backups, config
+  hashing, full round journaling (snapshots, raw replies, token usage —
+  `arena costs`).

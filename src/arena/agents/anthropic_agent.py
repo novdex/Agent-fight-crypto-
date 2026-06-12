@@ -59,8 +59,23 @@ class AnthropicAgent(BaseAgent):
             }
         return self._client.messages.create(**kwargs)
 
+    def ask(self, prompt: str) -> str:
+        """Free-form single-turn completion (debate phase)."""
+        try:
+            response = self._client.messages.create(
+                model=self.spec.model,
+                max_tokens=4000,
+                thinking={"type": "adaptive"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return "".join(
+                b.text for b in response.content if getattr(b, "type", None) == "text"
+            )
+        except anthropic.AnthropicError as exc:
+            raise AgentError(f"Anthropic ask failed for agent {self.name!r}: {exc}") from exc
+
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
-        prompt = build_prompt(snapshot)
+        prompt = self.prompt_preamble + build_prompt(snapshot)
         try:
             try:
                 response = self._create(prompt, structured=True)

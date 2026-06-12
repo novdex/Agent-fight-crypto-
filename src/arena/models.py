@@ -105,6 +105,7 @@ class AgentSpec(BaseModel):
     api_key_env: str = ""
     base_url: str = ""  # required for openai_compat
     seed: int = 0  # used by mock provider for determinism
+    role: str = "generalist"  # persona from arena.agents.personas.ROLES
 
 
 class RoundStatus(str, Enum):

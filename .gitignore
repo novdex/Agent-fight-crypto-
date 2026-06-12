@@ -9,3 +9,5 @@ dist/
 build/
 .pytest_cache/
 .claude/worktrees/
+memory/
+arena.db.bak.*

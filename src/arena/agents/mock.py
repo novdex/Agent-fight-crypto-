@@ -11,6 +11,15 @@ _DIRECTIONS = (Direction.LONG, Direction.SHORT, Direction.FLAT)
 
 
 class MockAgent(BaseAgent):
+    def ask(self, prompt: str) -> str:
+        """Deterministic canned reply so debate/e2e paths work offline."""
+        digest = hashlib.sha256(f"{self.spec.seed}:{prompt[:64]}".encode()).hexdigest()
+        return (
+            f"Mock analysis ({digest[:8]}): momentum is mixed; funding and "
+            "positioning argue for selectivity. Key risks: crowded longs on "
+            "majors, thin liquidity in the tail."
+        )
+
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
         seed = self.spec.seed
         signals: list[Signal] = []

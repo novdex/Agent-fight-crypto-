@@ -15,10 +15,17 @@ class AgentError(Exception):
 class BaseAgent:
     def __init__(self, spec: AgentSpec):
         self.spec = spec
+        #: Text prepended to the round prompt by providers — the CLI composes
+        #: persona, memory lessons, debate brief etc. into it per round.
+        self.prompt_preamble: str = ""
 
     @property
     def name(self) -> str:
         return self.spec.name
 
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
+        raise NotImplementedError
+
+    def ask(self, prompt: str) -> str:
+        """Free-form single-turn completion (used by the debate phase)."""
         raise NotImplementedError

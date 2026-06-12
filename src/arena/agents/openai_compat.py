@@ -54,8 +54,21 @@ class OpenAICompatAgent(BaseAgent):
             f"{_MAX_ATTEMPTS} attempts: {last_exc}"
         ) from last_exc
 
+    def ask(self, prompt: str) -> str:
+        """Free-form single-turn completion (debate phase)."""
+        base_url = self.spec.base_url.rstrip("/")
+        try:
+            response = self._post_with_retry(
+                f"{base_url}/chat/completions",
+                {"model": self.spec.model, "messages": [{"role": "user", "content": prompt}]},
+            )
+            text = response.json()["choices"][0]["message"]["content"]
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            raise AgentError(f"ask failed for agent {self.name!r}: {exc}") from exc
+        return text if isinstance(text, str) else ""
+
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
-        prompt = build_prompt(snapshot)
+        prompt = self.prompt_preamble + build_prompt(snapshot)
         base_url = self.spec.base_url.rstrip("/")
         body: dict = {
             "model": self.spec.model,
