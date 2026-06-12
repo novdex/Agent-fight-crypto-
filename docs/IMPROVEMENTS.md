@@ -373,3 +373,41 @@ harness culture).
   Santiment free tiers · CCXT — https://docs.ccxt.com/
 - López de Prado, *Advances in Financial Machine Learning* · Almgren & Chriss
   (optimal execution) · Thorp / MacLean et al. (Kelly criterion)
+
+---
+
+## Implementation status (post wave-2 build-out)
+
+**Fully implemented & tested (85):**
+1–7, 9–17, 19–21, 23–47, 49–52, 54, 57–59, 61–67, 69–72, 74–75, 77–78,
+80–84, 86–87, 89–92, 94–100 — plus 29 (absent agents keep weights), 41
+(regret in backtest), 42 (LMSR consensus mechanism, config-gated), 56
+(MVRV/SOPR, activates with a free Glassnode key).
+
+**Partial or simplified (13):**
+- 8 — PPO weight-learning substituted by the multiplicative engine +
+  per-asset routing + OPRO-lite prompt optimizer.
+- 18 — multi-timeframe features (1h ADX, technicals) instead of a separate
+  HF sub-team of agents.
+- 48 — basis/IV/orderbook landed; liquidation *clustering* not yet.
+- 53, 55, 60 — exchange netflows, whale transfers, social volume: stubs/
+  key-gated design in `arena.data.onchain`, fetchers not yet written.
+- 68 — margin/leverage pre-trade checks exist; full liquidation-price
+  simulation does not.
+- 73 — diversity/decorrelation acts on weights; correlation-shrunk *sizing*
+  not yet.
+- 76 — circuit-breaker states computed and warned; hard halt enforcement in
+  `loop` not wired.
+- 79 — market-neutral book builder + config flag exist; not yet applied to
+  the consensus book in `evaluate`.
+- 85 — survivorship handled for journaled replays; no historical top-20
+  backfill.
+- 88 — backtest benchmarks agents against each other; explicit BTC
+  buy-and-hold benchmark column not yet.
+
+**Not applicable by design (2):**
+- 22 — token-logprob probabilities don't map onto a 20-coin JSON reply;
+  verbalized probabilities + Brier + Platt calibration achieve the goal.
+- 93 (caching half) — arena prompts are below Anthropic's minimum cacheable
+  prefix, so prompt caching cannot trigger; the cost-tracking half (tokens +
+  `arena costs`) is implemented.

@@ -174,3 +174,25 @@ def test_market_neutral_book_balanced_legs() -> None:
     longs = sum(1 for d in dirs.values() if d == Direction.LONG)
     shorts = sum(1 for d in dirs.values() if d == Direction.SHORT)
     assert longs == shorts == 2
+
+
+def test_apply_v2_wick_stress_triggers_stop() -> None:
+    # Close at -1% survives a 3% stop, but a 2.5% adverse wick below the
+    # close (-3.5% total) crosses it -> stopped at the stop price.
+    settings = RiskSettings(stop_loss_pct=3.0, take_profit_pct=0.0,
+                            wick_stress_pct=2.5, slippage_base_bps=0.0,
+                            funding_in_pnl=False)
+    out = apply_round_to_equity_v2(
+        10_000.0, [_scored("BTC", Direction.LONG, 99.0)],
+        fractions={"BTC": 0.10}, fee_rate=0.0, settings=settings,
+    )
+    assert out["stopped"] == ["BTC"]
+    assert out["equity"] == pytest.approx(10_000.0 - 1_000.0 * 0.03)
+    # without wick stress the same position survives
+    calm = RiskSettings(stop_loss_pct=3.0, wick_stress_pct=0.0,
+                        slippage_base_bps=0.0, funding_in_pnl=False)
+    out2 = apply_round_to_equity_v2(
+        10_000.0, [_scored("BTC", Direction.LONG, 99.0)],
+        fractions={"BTC": 0.10}, fee_rate=0.0, settings=calm,
+    )
+    assert out2["stopped"] == []

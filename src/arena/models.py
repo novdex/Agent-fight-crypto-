@@ -180,6 +180,7 @@ class RiskSettings(BaseModel):
     drawdown_scale_threshold_pct: float = 10.0
     min_volume_mcap_ratio: float = 0.01  # liquidity screen (0 = off)
     slippage_base_bps: float = 2.0  # 0 disables slippage model
+    wick_stress_pct: float = 0.0  # adverse intrabar wick for stop checks (0 = off)
     funding_in_pnl: bool = True
     market_neutral: bool = False  # rank-based long-short construction
 

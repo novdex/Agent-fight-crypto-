@@ -44,6 +44,30 @@ def apply_round_to_equity_v2(
             stop_loss_pct=settings.stop_loss_pct,
             take_profit_pct=settings.take_profit_pct,
         )
+        # Intrabar wick stress (improvement #69): even when the close survives,
+        # an adverse wick of wick_stress_pct beyond the worst close can take
+        # out the stop. Checked against the stop side only.
+        if (
+            state == "open"
+            and settings.wick_stress_pct > 0
+            and settings.stop_loss_pct > 0
+        ):
+            wick = settings.wick_stress_pct / 100.0
+            if sig.direction == Direction.LONG:
+                adverse = min(sig.price_at_signal, sig.price_at_eval) * (1.0 - wick)
+            else:
+                adverse = max(sig.price_at_signal, sig.price_at_eval) * (1.0 + wick)
+            if (
+                check_stops(
+                    sig.price_at_signal,
+                    adverse,
+                    sig.direction,
+                    stop_loss_pct=settings.stop_loss_pct,
+                    take_profit_pct=0.0,
+                )
+                == "stopped"
+            ):
+                state = "stopped"
         sl_mult = settings.stop_loss_pct / 100.0
         tp_mult = settings.take_profit_pct / 100.0
         dir_mult = 1.0 if sig.direction == Direction.LONG else -1.0

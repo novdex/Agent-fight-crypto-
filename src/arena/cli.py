@@ -56,6 +56,50 @@ def _fmt_direction(direction: Direction) -> str:
     return f"[{style}]{direction.value}[/{style}]" if style else direction.value
 
 
+def _pool_signal_samples(samples: list[list[Signal]]) -> list[Signal]:
+    """Average probability vectors per symbol across reasoning samples.
+
+    Self-consistency pooling: the per-symbol mean of each sample's
+    (p_long, p_short, p_flat); direction = argmax of the pooled vector,
+    confidence = pooled max. Legacy samples without probs contribute a
+    confidence-weighted one-hot vector.
+    """
+    by_symbol: dict[str, list[Signal]] = {}
+    for sample in samples:
+        for sig in sample:
+            by_symbol.setdefault(sig.symbol, []).append(sig)
+    pooled: list[Signal] = []
+    for symbol, sigs in by_symbol.items():
+        vectors = []
+        for s in sigs:
+            if s.has_probs:
+                vectors.append((s.p_long or 0.0, s.p_short or 0.0, s.p_flat or 0.0))
+            else:
+                third = (1.0 - s.confidence) / 2.0
+                onehot = {
+                    Direction.LONG: (s.confidence, third, third),
+                    Direction.SHORT: (third, s.confidence, third),
+                    Direction.FLAT: (third, third, s.confidence),
+                }
+                vectors.append(onehot[s.direction])
+        n = len(vectors)
+        p = tuple(sum(v[i] for v in vectors) / n for i in range(3))
+        directions = (Direction.LONG, Direction.SHORT, Direction.FLAT)
+        best = max(range(3), key=lambda i: p[i])
+        pooled.append(
+            sigs[0].model_copy(
+                update={
+                    "direction": directions[best],
+                    "confidence": p[best],
+                    "p_long": p[0],
+                    "p_short": p[1],
+                    "p_flat": p[2],
+                }
+            )
+        )
+    return pooled
+
+
 def _signals_table(round_id: int, signals: list[Signal]) -> Table:
     table = Table(title=f"Round {round_id} signals")
     table.add_column("Agent", style="bold")
@@ -198,6 +242,34 @@ def cmd_run_round(args: argparse.Namespace) -> int:
             "round aborted (an arena needs at least two fighters)."
         )
         return 1
+
+    # Self-consistency (improvement #13): re-sample low-conviction agents and
+    # pool the probability vectors across samples.
+    try:
+        threshold = cfg.debate.self_consistency_below
+        if threshold > 0:
+            for agent in agents:
+                sigs = signals_by_agent.get(agent.name)
+                if not sigs:
+                    continue
+                mean_conf = sum(s.confidence for s in sigs) / len(sigs)
+                if mean_conf >= threshold:
+                    continue
+                samples = [sigs]
+                for _ in range(2):
+                    try:
+                        samples.append(agent.generate_signals(snapshot))
+                    except Exception:
+                        break
+                if len(samples) > 1:
+                    signals_by_agent[agent.name] = _pool_signal_samples(samples)
+                    err.print(
+                        f"[dim]{agent.name}: low conviction "
+                        f"({mean_conf:.2f} < {threshold}); pooled "
+                        f"{len(samples)} samples.[/dim]"
+                    )
+    except Exception as exc:
+        err.print(f"[dim]self-consistency skipped: {exc}[/dim]")
 
     # Deterministic critic pass: attenuate rationale-vs-data contradictions.
     if cfg.debate.critic:
