@@ -14,6 +14,39 @@ arena:
   db_path: arena.db
   start_equity: 10000      # paper-trading starting equity per agent
 
+# --- Wave-2 feature blocks (all optional; defaults shown in models.py) -----
+debate:
+  enabled: false           # bull/bear debate brief + critic pass (extra LLM calls)
+memory:
+  enabled: true            # per-agent lessons injected into prompts
+calibration:
+  enabled: true            # per-agent Platt calibration of stated probabilities
+  method: platt
+weights:
+  per_asset: true          # W[coin][agent] decision-power matrix
+  regime_conditional: true # separate bull/bear/chop weight books
+consensus:
+  extremize_lambda: 1.3    # Good-Judgment-style extremizing (1.0 = off)
+  herding_haircut: 0.85    # confidence haircut when all agents agree
+  no_trade_min_confidence: 0.0   # skip the round below this (0 = off)
+  mechanism: vote          # vote | lmsr
+risk:
+  kelly_fraction: 0.25     # fractional-Kelly sizing (0 = legacy equal stake)
+  max_position_pct: 10
+  daily_loss_limit_pct: 2
+  max_drawdown_halt_pct: 15
+  min_volume_mcap_ratio: 0.01
+  slippage_base_bps: 2
+  funding_in_pnl: true
+  market_neutral: false
+ops:
+  json_logs: false
+  journal: true            # persist snapshots, raw replies, per-agent cost
+  structured_outputs: true # provider-native JSON schema enforcement
+exchange:
+  connector: paper         # paper | binanceusdm | bybit (live needs `pip install -e ".[live]"`)
+  testnet: true
+
 agents:
   - name: claude
     provider: anthropic

@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+live = ["ccxt>=4.0"]  # real/testnet exchange execution (arena.exchange)
 
 [project.scripts]
 arena = "arena.cli:main"
