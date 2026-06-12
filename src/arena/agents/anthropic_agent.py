@@ -1,0 +1,33 @@
+"""Anthropic (Claude) agent using the official anthropic SDK."""
+
+from __future__ import annotations
+
+import anthropic
+
+from arena.config import api_key_for
+from arena.agents.base import AgentError, BaseAgent
+from arena.agents.prompts import build_prompt, parse_signals
+from arena.models import AgentSpec, MarketSnapshot, Signal
+
+
+class AnthropicAgent(BaseAgent):
+    def __init__(self, spec: AgentSpec):
+        super().__init__(spec)
+        self._client = anthropic.Anthropic(api_key=api_key_for(spec.api_key_env))
+
+    def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
+        prompt = build_prompt(snapshot)
+        try:
+            response = self._client.messages.create(
+                model=self.spec.model,
+                max_tokens=16000,
+                thinking={"type": "adaptive"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except anthropic.AnthropicError as exc:
+            raise AgentError(f"Anthropic API call failed for agent {self.name!r}: {exc}") from exc
+
+        text = "".join(
+            block.text for block in response.content if getattr(block, "type", None) == "text"
+        )
+        return parse_signals(text, self.name, snapshot)
