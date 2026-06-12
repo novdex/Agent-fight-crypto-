@@ -237,3 +237,23 @@ financial advice.** Cryptocurrency markets are extremely volatile; LLM signals
 can be confidently and persistently wrong. **Never wire this software to real
 funds** or trade based on its signals without fully understanding the risks —
 if you do so anyway, you alone bear the consequences.
+
+## Deploy on a VPS
+
+A one-shot installer for Debian/Ubuntu lives in `deploy/`:
+
+```bash
+# on the server, as root:
+git clone <this-repo> /tmp/arena-src
+sudo /tmp/arena-src/deploy/deploy.sh <this-repo-git-url> <branch>
+# add your API keys:
+sudo nano /opt/crypto-llm-arena/.env
+sudo systemctl restart arena
+# watch the fight:
+journalctl -u arena -f
+sudo -u arena /opt/crypto-llm-arena/.venv/bin/arena leaderboard
+```
+
+This installs to `/opt/crypto-llm-arena` under a dedicated non-login `arena`
+user and runs `arena loop --interval-mins 60` as a systemd service
+(auto-restarts on failure, survives reboots via `systemctl enable`).

@@ -1,0 +1,16 @@
+[Unit]
+Description=Crypto LLM Arena bot (LLMs fight for decision power over crypto signals)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arena
+WorkingDirectory=/opt/crypto-llm-arena
+EnvironmentFile=/opt/crypto-llm-arena/.env
+ExecStart=/opt/crypto-llm-arena/.venv/bin/arena loop --interval-mins 60
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
