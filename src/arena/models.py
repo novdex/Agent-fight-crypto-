@@ -106,6 +106,10 @@ class AgentSpec(BaseModel):
     base_url: str = ""  # required for openai_compat
     seed: int = 0  # used by mock provider for determinism
     role: str = "generalist"  # persona from arena.agents.personas.ROLES
+    # Derive probabilities from token logprobs via one single-token
+    # classification call per coin (openai_compat only; ~20 tiny extra calls
+    # per round). More faithful than verbalized numbers, at extra cost.
+    logprob_probs: bool = False
 
 
 class RoundStatus(str, Enum):
@@ -181,6 +185,9 @@ class RiskSettings(BaseModel):
     min_volume_mcap_ratio: float = 0.01  # liquidity screen (0 = off)
     slippage_base_bps: float = 2.0  # 0 disables slippage model
     wick_stress_pct: float = 0.0  # adverse intrabar wick for stop checks (0 = off)
+    assumed_leverage: float = 1.0  # position leverage for liquidation modeling
+    maintenance_margin_pct: float = 0.5  # maintenance margin (% of notional)
+    correlation_shrink: bool = True  # shrink same-direction stakes by 1/sqrt(k)
     funding_in_pnl: bool = True
     market_neutral: bool = False  # rank-based long-short construction
 

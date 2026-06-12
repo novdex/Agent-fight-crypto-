@@ -60,6 +60,38 @@ def parse_taker_ratio(rows: list[dict]) -> Optional[float]:
     return buy / total
 
 
+def parse_liquidation_clusters(
+    rows: list[dict], price: float
+) -> tuple[Optional[float], Optional[float]]:
+    """(liq_24h_musd, nearest_cluster_dist_pct) from forceOrders-style rows.
+
+    Liquidations are bucketed into 0.5%-wide price bands; the heaviest band
+    is the "cluster" and its distance from the current price (in %) marks
+    the cascade zone. Returns (None, None) on empty/unusable input.
+    """
+    if price <= 0:
+        return None, None
+    total_usd = 0.0
+    buckets: dict[int, float] = {}
+    for row in rows:
+        try:
+            order = row.get("order", row)  # raw stream wraps in {"order": ...}
+            p = float(order.get("avgPrice") or order.get("price") or 0)
+            q = float(order.get("executedQty") or order.get("origQty") or 0)
+        except (TypeError, ValueError):
+            continue
+        if p <= 0 or q <= 0:
+            continue
+        usd = p * q
+        total_usd += usd
+        band = int(round(200.0 * (p - price) / price))  # 0.5% bands
+        buckets[band] = buckets.get(band, 0.0) + usd
+    if total_usd <= 0:
+        return None, None
+    heaviest = max(buckets, key=lambda b: buckets[b])
+    return total_usd / 1e6, abs(heaviest) / 2.0
+
+
 def parse_basis_pct(mark: float, spot: float) -> float:
     """Perp-vs-spot basis in % (positive = perp premium / bullish structure)."""
     return 100.0 * (mark - spot) / spot if spot else 0.0
@@ -114,6 +146,18 @@ def enrich_micro(snapshot: MarketSnapshot) -> MarketSnapshot:
                         )
                     except (KeyError, TypeError, ValueError):
                         pass
+                liqs = _get(
+                    f"{BINANCE_FAPI}/fapi/v1/allForceOrders", "liquidations",
+                    symbol=pair, limit=500,
+                )
+                if isinstance(liqs, list):
+                    liq_musd, cluster_dist = parse_liquidation_clusters(
+                        liqs, coin.price_usd
+                    )
+                    if liq_musd is not None:
+                        coin.extras["liq_24h_musd"] = round(liq_musd, 2)
+                    if cluster_dist is not None:
+                        coin.extras["liq_cluster_dist_pct"] = round(cluster_dist, 2)
                 if coin.symbol.upper() in ("BTC", "ETH"):
                     dvol = _get(
                         f"{DERIBIT}/api/v2/public/get_volatility_index_data",

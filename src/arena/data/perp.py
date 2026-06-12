@@ -209,6 +209,32 @@ def enrich_snapshot(snapshot: MarketSnapshot) -> MarketSnapshot:
                 if isinstance(klines, list):
                     highs, lows, closes = parse_klines_ohlc(klines)
                     coin.adx_14 = adx(highs, lows, closes, 14)
+                    try:
+                        # Fast multi-timeframe sub-team votes (improvement #18)
+                        # + extra 1h technicals, from the same kline fetch.
+                        from arena.agents.subteam import subteam_votes
+                        from arena.data.technicals import (
+                            bollinger_width_pct,
+                            ema_ribbon_slope,
+                            hurst_exponent,
+                            macd_histogram,
+                            stoch_rsi,
+                        )
+
+                        for key, vote in subteam_votes(closes).items():
+                            coin.extras[key] = float(vote)
+                        for key, fn in (
+                            ("hurst", hurst_exponent),
+                            ("macd_hist", macd_histogram),
+                            ("stoch_rsi", stoch_rsi),
+                            ("bb_width_pct", bollinger_width_pct),
+                            ("ema_ribbon", ema_ribbon_slope),
+                        ):
+                            value = fn(closes)
+                            if value is not None:
+                                coin.extras[key] = round(float(value), 4)
+                    except Exception:
+                        pass
     except Exception as exc:  # client construction or anything unforeseen
         _warn_once(warned, "perp_enrichment", exc)
 

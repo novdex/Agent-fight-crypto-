@@ -167,10 +167,37 @@ class ReplayBacktester:
             )
         leaderboard.sort(key=lambda row: (-row["weight"], -row["avg_score"], row["agent"]))
 
+        # Buy-and-hold benchmark (improvement #88): hold the first coin (BTC
+        # when present) across the whole replay; alpha = beating this line.
+        benchmark: dict = {}
+        if self.snapshots and self.snapshots[0].coins:
+            bench_coin = self.snapshots[0].coin("BTC") or self.snapshots[0].coins[0]
+            symbol = bench_coin.symbol
+            curve: list[float] = []
+            entry = bench_coin.price_usd
+            if entry > 0:
+                for snap_t in self.snapshots[1:]:
+                    coin_t = snap_t.coin(symbol)
+                    if coin_t is not None:
+                        curve.append(start_equity * coin_t.price_usd / entry)
+                    elif curve:
+                        curve.append(curve[-1])
+                if curve:
+                    benchmark = {
+                        "symbol": symbol,
+                        "equity": curve[-1],
+                        "equity_curve": curve,
+                    }
+
         return {
             "leaderboard": leaderboard,
             "equity_curves": equity_curves,
             "regret": regret,
+            "benchmark": benchmark,
+            # Survivorship note (improvement #85): journaled snapshots carry
+            # the true as-of universe; synthetic/current-universe replays are
+            # flagged so results are read with the right caveat.
+            "survivorship_safe": all(bool(s.coins) for s in self.snapshots),
         }
 
 

@@ -80,10 +80,55 @@ def fetch_headlines(limit: int = 8) -> list[str]:
     return []
 
 
+REDDIT_NEW = "https://www.reddit.com/r/CryptoCurrency/new.json?limit=100"
+
+
+def social_mention_counts(titles: list[str], symbols: list[str]) -> dict[str, int]:
+    """Count symbol mentions across post titles (whole-word, case-insensitive)."""
+    import re
+
+    counts: dict[str, int] = {}
+    joined = "\n".join(titles).upper()
+    for sym in symbols:
+        s = sym.upper()
+        if len(s) < 2:
+            continue
+        counts[sym] = len(re.findall(rf"\b{re.escape(s)}\b", joined))
+    return counts
+
+
+def fetch_social_titles() -> list[str]:
+    """Recent r/CryptoCurrency post titles (free, no key); [] on failure."""
+    try:
+        with httpx.Client(
+            timeout=_TIMEOUT_S, headers={"User-Agent": "crypto-llm-arena/0.1"}
+        ) as client:
+            resp = client.get(REDDIT_NEW)
+            resp.raise_for_status()
+            children = resp.json().get("data", {}).get("children", [])
+            return [
+                str(c.get("data", {}).get("title", "")) for c in children if c
+            ]
+    except Exception as exc:
+        print(f"warning: social source 'reddit' unavailable ({exc})", file=sys.stderr)
+        return []
+
+
 def enrich_news(snapshot: MarketSnapshot) -> MarketSnapshot:
-    """Attach headlines (and event tags as pseudo-headlines); never raises."""
+    """Attach headlines, event tags and social mention counts; never raises."""
     headlines = fetch_headlines()
     events = detect_events(headlines)
     if events:
         headlines = [f"[EVENTS: {', '.join(events)}]"] + headlines
-    return snapshot.model_copy(update={"headlines": headlines[:9]})
+    coins = snapshot.coins
+    titles = fetch_social_titles()
+    if titles:
+        # Social-volume anomaly proxy (improvement #60): raw mention counts;
+        # the LLMs see spikes relative to the rest of the board.
+        counts = social_mention_counts(titles, [c.symbol for c in coins])
+        coins = [c.model_copy(deep=True) for c in coins]
+        for coin in coins:
+            n = counts.get(coin.symbol, 0)
+            if n > 0:
+                coin.extras["social_mentions"] = float(n)
+    return snapshot.model_copy(update={"headlines": headlines[:9], "coins": coins})

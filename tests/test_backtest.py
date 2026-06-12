@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from arena.agents.mock import MockAgent
 from arena.backtest import (
     ReplayBacktester,
@@ -127,7 +129,7 @@ def test_replay_deterministic_and_shapes() -> None:
     result2 = ReplayBacktester(synthetic_snapshots(12, 4, seed=1), _mock_agents()).run()
 
     assert result1["leaderboard"] == result2["leaderboard"]
-    assert set(result1) == {"leaderboard", "equity_curves", "regret"}
+    assert {"leaderboard", "equity_curves", "regret", "benchmark"} <= set(result1)
 
     # 12 snapshots -> 11 walk-forward rounds.
     for curve in result1["equity_curves"].values():
@@ -211,3 +213,29 @@ def test_round_report_empty_round() -> None:
     md = round_report_markdown(1, [], {}, {"a": 0.5, "b": 0.5}, {"a": 0.5, "b": 0.5})
     assert "No signals" in md
     assert "| a |" in md and "| b |" in md
+
+
+def test_replay_benchmark_and_tuner() -> None:
+    from arena.agents.mock import MockAgent
+    from arena.backtest.replay import ReplayBacktester, synthetic_snapshots
+    from arena.backtest.tune import tune_parameters
+    from arena.models import AgentSpec
+
+    snaps = synthetic_snapshots(10, 3, seed=5)
+    agents = [MockAgent(AgentSpec(name=f"m{i}", provider="mock", seed=i)) for i in range(3)]
+    result = ReplayBacktester(snaps, agents).run()
+    bench = result["benchmark"]
+    assert bench and bench["symbol"] == snaps[0].coins[0].symbol
+    assert len(bench["equity_curve"]) == len(snaps) - 1
+    # buy & hold equity must track the price ratio exactly
+    sym = bench["symbol"]
+    ratio = snaps[-1].coin(sym).price_usd / snaps[0].coin(sym).price_usd
+    assert bench["equity"] == pytest.approx(10_000.0 * ratio)
+    assert result["survivorship_safe"] is True
+
+    tuned = tune_parameters(snaps, agents, etas=(0.2, 0.5), max_weights=(0.6,))
+    assert tuned["best"] in tuned["trials"]
+    assert len(tuned["trials"]) == 2
+    # determinism
+    tuned2 = tune_parameters(snaps, agents, etas=(0.2, 0.5), max_weights=(0.6,))
+    assert tuned["trials"] == tuned2["trials"]

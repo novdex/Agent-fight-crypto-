@@ -196,3 +196,41 @@ def test_apply_v2_wick_stress_triggers_stop() -> None:
         fractions={"BTC": 0.10}, fee_rate=0.0, settings=calm,
     )
     assert out2["stopped"] == []
+
+
+def test_liquidation_simulation_at_leverage() -> None:
+    from arena.risk.controls import liquidation_price
+
+    assert liquidation_price(100.0, Direction.LONG, leverage=1.0) is None
+    liq = liquidation_price(100.0, Direction.LONG, leverage=10.0,
+                            maintenance_margin_pct=0.5)
+    assert liq == pytest.approx(100.0 * (1 - (0.1 - 0.005)))  # 90.5
+    # 10x long, close at -8% (above liq) but a 3% wick pierces 90.5 -> liquidated
+    settings = RiskSettings(assumed_leverage=10.0, wick_stress_pct=3.0,
+                            stop_loss_pct=0.0, take_profit_pct=0.0,
+                            slippage_base_bps=0.0, funding_in_pnl=False)
+    out = apply_round_to_equity_v2(
+        10_000.0, [_scored("BTC", Direction.LONG, 92.0)],
+        fractions={"BTC": 0.10}, fee_rate=0.0, settings=settings,
+    )
+    assert out["stopped"] == ["BTC"]
+    # exits at liq 90.5: r=-9.5%, x10 leverage on 1000 stake = -950
+    assert out["equity"] == pytest.approx(10_000.0 - 1_000.0 * 0.095 * 10.0)
+
+
+def test_correlation_shrink_same_direction() -> None:
+    import math
+
+    on = RiskSettings(kelly_fraction=0.0, correlation_shrink=True,
+                      max_gross_leverage=10.0, max_position_pct=10.0)
+    off = on.model_copy(update={"correlation_shrink": False})
+    sigs = [_sig(s, Direction.LONG) for s in ("A", "B", "C", "D")]
+    fr_on = position_fractions({}, sigs, 10_000.0, on)
+    fr_off = position_fractions({}, sigs, 10_000.0, off)
+    for sym in ("A", "B", "C", "D"):
+        assert fr_on[sym] == pytest.approx(fr_off[sym] / math.sqrt(4))
+    # one long + one short: each is alone in its direction (k=1) -> no shrink
+    mixed = position_fractions({}, [_sig("A", Direction.LONG), _sig("B", Direction.SHORT)],
+                               10_000.0, on)
+    assert mixed["A"] == pytest.approx(mixed["B"])
+    assert mixed["A"] == pytest.approx(fr_off["A"])

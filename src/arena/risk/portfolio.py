@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from arena.models import Direction, RiskSettings, ScoredSignal, Signal
 
-from arena.risk.controls import check_stops
+from arena.risk.controls import check_stops, liquidation_price
 
 
 def apply_round_to_equity_v2(
@@ -78,8 +78,30 @@ def apply_round_to_equity_v2(
             exit_price = sig.price_at_signal * (1.0 + dir_mult * tp_mult)
             stopped.append(sig.symbol)
 
+        # Liquidation simulation (improvement #68): with leverage > 1x, the
+        # adverse path (including the stress wick) can cross the liquidation
+        # price before any stop — forced exit there, leverage amplifies PnL.
+        liq = liquidation_price(
+            sig.price_at_signal,
+            sig.direction,
+            leverage=settings.assumed_leverage,
+            maintenance_margin_pct=settings.maintenance_margin_pct,
+        )
+        if liq is not None:
+            wick = settings.wick_stress_pct / 100.0
+            if sig.direction == Direction.LONG:
+                worst = min(sig.price_at_signal, sig.price_at_eval) * (1.0 - wick)
+                liquidated = worst <= liq
+            else:
+                worst = max(sig.price_at_signal, sig.price_at_eval) * (1.0 + wick)
+                liquidated = worst >= liq
+            if liquidated:
+                exit_price = liq
+                if sig.symbol not in stopped:
+                    stopped.append(sig.symbol)
+
         r = (exit_price - sig.price_at_signal) / sig.price_at_signal
-        pnl += stake * r * dir_mult
+        pnl += stake * r * dir_mult * max(settings.assumed_leverage, 1.0)
 
         position_fees = 2.0 * fee_rate * stake
         fees += position_fees

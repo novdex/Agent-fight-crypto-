@@ -16,8 +16,32 @@ import httpx
 from arena.models import MarketSnapshot
 
 GLASSNODE = "https://api.glassnode.com/v1/metrics"
+CRYPTOQUANT = "https://api.cryptoquant.com/v1"
 DEFILLAMA_STABLES = "https://stablecoins.llama.fi/stablecoins?includePrices=false"
 _TIMEOUT_S = 15.0
+
+
+def parse_netflow_musd(payload: dict) -> Optional[float]:
+    """Latest exchange netflow (USD millions) from a CryptoQuant-style reply.
+
+    Positive = net inflow to exchanges (distribution / bearish), negative =
+    outflow (accumulation / bullish).
+    """
+    try:
+        rows = payload["result"]["data"]
+        return float(rows[-1]["netflow_total"]) / 1e6
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def parse_whale_tx_musd(payload: dict) -> Optional[float]:
+    """24h whale-transfer volume (USD millions) from a whale-alert-style reply."""
+    try:
+        txs = payload.get("transactions", [])
+        total = sum(float(t.get("amount_usd", 0) or 0) for t in txs)
+        return total / 1e6 if txs else None
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_stablecoin_supply_chg_pct(payload: dict) -> Optional[float]:
@@ -59,6 +83,35 @@ def enrich_onchain(snapshot: MarketSnapshot) -> MarketSnapshot:
                     extras["stablecoin_supply_chg_pct"] = round(chg, 3)
             except Exception as exc:
                 _warn_once(warned, "defillama", exc)
+
+            cq_key = os.environ.get("CRYPTOQUANT_API_KEY", "")
+            if cq_key:  # exchange netflow (improvement #53)
+                try:
+                    r = client.get(
+                        f"{CRYPTOQUANT}/btc/exchange-flows/netflow",
+                        params={"exchange": "all_exchange", "window": "day", "limit": 1},
+                        headers={"Authorization": f"Bearer {cq_key}"},
+                    )
+                    r.raise_for_status()
+                    nf = parse_netflow_musd(r.json())
+                    if nf is not None:
+                        extras["exch_netflow_musd"] = round(nf, 2)
+                except Exception as exc:
+                    _warn_once(warned, "cryptoquant:netflow", exc)
+
+            wa_key = os.environ.get("WHALE_ALERT_API_KEY", "")
+            if wa_key:  # whale transfers (improvement #55)
+                try:
+                    r = client.get(
+                        "https://api.whale-alert.io/v1/transactions",
+                        params={"api_key": wa_key, "min_value": 1_000_000, "limit": 100},
+                    )
+                    r.raise_for_status()
+                    wt = parse_whale_tx_musd(r.json())
+                    if wt is not None:
+                        extras["whale_tx_musd"] = round(wt, 1)
+                except Exception as exc:
+                    _warn_once(warned, "whale_alert", exc)
 
             gn_key = os.environ.get("GLASSNODE_API_KEY", "")
             if gn_key:

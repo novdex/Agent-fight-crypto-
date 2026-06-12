@@ -9,7 +9,7 @@ import httpx
 from arena.config import api_key_for
 from arena.agents.base import AgentError, BaseAgent
 from arena.agents.prompts import build_prompt, parse_signals
-from arena.models import AgentSpec, MarketSnapshot, Signal
+from arena.models import AgentSpec, Direction, MarketSnapshot, Signal
 
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 3
@@ -67,6 +67,62 @@ class OpenAICompatAgent(BaseAgent):
             raise AgentError(f"ask failed for agent {self.name!r}: {exc}") from exc
         return text if isinstance(text, str) else ""
 
+    def _logprob_refine(self, sig: Signal, snapshot: MarketSnapshot) -> Signal:
+        """Replace verbalized probabilities with logprob-derived ones (#22).
+
+        One single-token classification call per coin: softmax over the
+        LONG/SHORT/FLAT top-logprobs (Kadavath et al. 2022 — model-internal
+        probabilities are better calibrated than verbalized ones). Any
+        failure keeps the verbalized vector.
+        """
+        import math
+
+        coin = snapshot.coin(sig.symbol)
+        if coin is None:
+            return sig
+        base_url = self.spec.base_url.rstrip("/")
+        prompt = (
+            f"{sig.symbol} at ${coin.price_usd:,.4f}: 24h change "
+            f"{coin.change_24h_pct if coin.change_24h_pct is not None else 'n/a'}%, "
+            f"RSI {coin.rsi_14 if coin.rsi_14 is not None else 'n/a'}. Over the "
+            "next 24h, will it move >+1% (LONG), <-1% (SHORT), or in between "
+            "(FLAT)? Answer with exactly one word: LONG, SHORT, or FLAT."
+        )
+        try:
+            response = self._post_with_retry(
+                f"{base_url}/chat/completions",
+                {
+                    "model": self.spec.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 2,
+                    "logprobs": True,
+                    "top_logprobs": 10,
+                },
+            )
+            content = response.json()["choices"][0]["logprobs"]["content"]
+            top = content[0]["top_logprobs"]
+            logits = {"LONG": None, "SHORT": None, "FLAT": None}
+            for entry in top:
+                token = str(entry.get("token", "")).strip().upper()
+                if token in logits and logits[token] is None:
+                    logits[token] = float(entry["logprob"])
+            floor = min(v for v in logits.values() if v is not None) - 2.0
+            exps = {k: math.exp(v if v is not None else floor) for k, v in logits.items()}
+            total = sum(exps.values())
+            p = {k: v / total for k, v in exps.items()}
+        except Exception:
+            return sig  # keep the verbalized vector
+        direction = max(p, key=p.get)
+        return sig.model_copy(
+            update={
+                "p_long": p["LONG"],
+                "p_short": p["SHORT"],
+                "p_flat": p["FLAT"],
+                "direction": Direction(direction),
+                "confidence": p[direction],
+            }
+        )
+
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
         prompt = self.prompt_preamble + build_prompt(snapshot)
         base_url = self.spec.base_url.rstrip("/")
@@ -107,6 +163,9 @@ class OpenAICompatAgent(BaseAgent):
             raise AgentError(f"Non-text completion content for agent {self.name!r}")
         self.last_raw = text
         try:
-            return parse_signals(text, self.name, snapshot)
+            signals = parse_signals(text, self.name, snapshot)
+            if self.spec.logprob_probs:
+                signals = [self._logprob_refine(s, snapshot) for s in signals]
+            return signals
         except Exception as exc:  # one agent's failure must never crash a round
             raise AgentError(f"Failed to parse reply from agent {self.name!r}: {exc}") from exc

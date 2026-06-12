@@ -143,3 +143,68 @@ def test_enrich_news_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(httpx.Client, "get", dead_get)
     out = enrich_news(_snap())
     assert out.headlines == []
+
+
+def test_parse_liquidation_clusters() -> None:
+    from arena.data.micro import parse_liquidation_clusters
+
+    rows = [
+        {"order": {"avgPrice": "99.5", "executedQty": "100"}},
+        {"order": {"avgPrice": "99.4", "executedQty": "200"}},
+        {"order": {"avgPrice": "101.0", "executedQty": "10"}},
+    ]
+    musd, dist = parse_liquidation_clusters(rows, 100.0)
+    assert musd == pytest.approx((99.5 * 100 + 99.4 * 200 + 101.0 * 10) / 1e6)
+    assert dist is not None and dist < 1.0  # heaviest cluster just below price
+    assert parse_liquidation_clusters([], 100.0) == (None, None)
+
+
+def test_onchain_netflow_and_whale_parsers() -> None:
+    from arena.data.onchain import parse_netflow_musd, parse_whale_tx_musd
+
+    nf = parse_netflow_musd({"result": {"data": [{"netflow_total": -25_000_000}]}})
+    assert nf == pytest.approx(-25.0)
+    assert parse_netflow_musd({}) is None
+    wt = parse_whale_tx_musd({"transactions": [{"amount_usd": 5e6}, {"amount_usd": 3e6}]})
+    assert wt == pytest.approx(8.0)
+    assert parse_whale_tx_musd({"transactions": []}) is None
+
+
+def test_social_mention_counts() -> None:
+    from arena.data.news import social_mention_counts
+
+    titles = ["BTC to the moon", "Why btc and ETH diverge", "SOLid analysis"]
+    counts = social_mention_counts(titles, ["BTC", "ETH", "SOL"])
+    assert counts["BTC"] == 2 and counts["ETH"] == 1
+    assert counts["SOL"] == 0  # whole-word: 'SOLid' must not match
+
+
+def test_subteam_votes() -> None:
+    from arena.agents.subteam import subteam_votes, trend_vote
+
+    trend = [100.0 * (1.01 ** i) for i in range(120)]
+    assert trend_vote(trend) == 1
+    assert trend_vote(list(reversed(trend))) == -1
+    votes = subteam_votes(trend)
+    assert votes.get("sub_trend") == 1
+    assert set(votes) <= {"sub_indicator", "sub_trend", "sub_pattern"}
+    assert subteam_votes([1.0, 2.0]) == {}  # insufficient data -> abstain
+
+
+def test_prompt_cache_split_round_trips() -> None:
+    from datetime import datetime, timezone
+
+    from arena.agents.prompts import build_prompt, market_section, output_contract
+
+    snap = MarketSnapshot(
+        as_of=datetime(2026, 6, 12, tzinfo=timezone.utc),
+        coins=[CoinSnapshot(symbol="BTC", price_usd=1.0)],
+        headlines=["[EVENTS: ETF_FLOW]", "Bitcoin ETF inflows"],
+    )
+    contract, market = output_contract(), market_section(snap)
+    assert "p_long" in contract  # static instructions present
+    assert "2026-06-12" not in contract  # no per-round data in the prefix
+    assert "BTC" in market and "headlines" in market.lower()
+    # legacy single-string path still contains everything parse needs
+    full = build_prompt(snap)
+    assert "p_long" in full and "BTC" in full

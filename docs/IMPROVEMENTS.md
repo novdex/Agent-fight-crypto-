@@ -378,36 +378,31 @@ harness culture).
 
 ## Implementation status (post wave-2 build-out)
 
-**Fully implemented & tested (85):**
-1–7, 9–17, 19–21, 23–47, 49–52, 54, 57–59, 61–67, 69–72, 74–75, 77–78,
-80–84, 86–87, 89–92, 94–100 — plus 29 (absent agents keep weights), 41
-(regret in backtest), 42 (LMSR consensus mechanism, config-gated), 56
-(MVRV/SOPR, activates with a free Glassnode key).
+**All 100 implemented.** 92 are unconditional; 8 are config- or key-gated by
+design (they cost extra API calls or need free-tier keys):
 
-**Partial or simplified (13):**
-- 8 — PPO weight-learning substituted by the multiplicative engine +
-  per-asset routing + OPRO-lite prompt optimizer.
-- 18 — multi-timeframe features (1h ADX, technicals) instead of a separate
-  HF sub-team of agents.
-- 48 — basis/IV/orderbook landed; liquidation *clustering* not yet.
-- 53, 55, 60 — exchange netflows, whale transfers, social volume: stubs/
-  key-gated design in `arena.data.onchain`, fetchers not yet written.
-- 68 — margin/leverage pre-trade checks exist; full liquidation-price
-  simulation does not.
-- 73 — diversity/decorrelation acts on weights; correlation-shrunk *sizing*
-  not yet.
-- 76 — circuit-breaker states computed and warned; hard halt enforcement in
-  `loop` not wired.
-- 79 — market-neutral book builder + config flag exist; not yet applied to
-  the consensus book in `evaluate`.
-- 85 — survivorship handled for journaled replays; no historical top-20
-  backfill.
-- 88 — backtest benchmarks agents against each other; explicit BTC
-  buy-and-hold benchmark column not yet.
+- #8 — learned weighting via deterministic policy search on the replay
+  backtester (`arena tune`, gradient-free stand-in for PPO).
+- #13 — self-consistency resampling, `debate.self_consistency_below` (off by
+  default: 3x calls on the low-conviction slice).
+- #22 — logprob-derived probabilities via per-coin single-token
+  classification, `agents[].logprob_probs` (openai_compat; ~20 extra tiny
+  calls per round).
+- #42 — LMSR consensus, `consensus.mechanism: lmsr`.
+- #53/#55/#56 — exchange netflows (CRYPTOQUANT_API_KEY), whale transfers
+  (WHALE_ALERT_API_KEY), MVRV/SOPR (GLASSNODE_API_KEY) — free-tier keys.
+- #93 — cache-correct system/user prompt split with `cache_control` on the
+  byte-stable instruction prefix (hits engage once the prefix clears the
+  model's minimum cacheable length) + full token/cost tracking
+  (`arena costs`).
 
-**Not applicable by design (2):**
-- 22 — token-logprob probabilities don't map onto a 20-coin JSON reply;
-  verbalized probabilities + Brier + Platt calibration achieve the goal.
-- 93 (caching half) — arena prompts are below Anthropic's minimum cacheable
-  prefix, so prompt caching cannot trigger; the cost-tracking half (tokens +
-  `arena costs`) is implemented.
+Notable interpretations (documented in code): #18 is a deterministic
+1h sub-team (indicator/trend/pattern votes) rather than three extra LLM
+roles; #48 clusters Binance force-orders into 0.5% bands; #60 uses Reddit
+mention counts (keyless) as the social-volume proxy; #68 models isolated-
+margin liquidation at `risk.assumed_leverage`; #73 shrinks same-direction
+stakes by 1/sqrt(k) as the high-correlation approximation; #76 halts new
+rounds in `arena loop` on breaker trips while evaluation continues; #85
+journaled snapshots carry the true as-of universe and non-journaled replays
+are flagged `survivorship_safe: false`; #88 every backtest reports the
+buy-and-hold benchmark.

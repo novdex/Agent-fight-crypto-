@@ -126,6 +126,21 @@ def position_fractions(
                 frac *= _vol_scalar(vol, settings.vol_target_annual_pct)
         if frac > 0.0:
             fractions[sig.symbol] = frac
+    # 4b. correlation shrink (improvement #73): top-20 cryptos move with
+    # ~0.8 beta to BTC, so k same-direction positions behave closer to one
+    # big position than k independent ones. Scale each same-direction stake
+    # by 1/sqrt(k) so portfolio variance stays roughly constant in k.
+    if settings.correlation_shrink:
+        direction_of = {
+            s.symbol: s.direction for s in signals if s.symbol in fractions
+        }
+        counts: dict[Direction, int] = {}
+        for d in direction_of.values():
+            counts[d] = counts.get(d, 0) + 1
+        fractions = {
+            sym: f / math.sqrt(counts.get(direction_of.get(sym), 1))
+            for sym, f in fractions.items()
+        }
     # 5. drawdown scaling.
     if (
         settings.drawdown_scale_threshold_pct > 0.0

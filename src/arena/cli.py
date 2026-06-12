@@ -338,6 +338,13 @@ def cmd_run_round(args: argparse.Namespace) -> int:
                     "[yellow]no-trade gate:[/yellow] aggregate conviction below "
                     "threshold; round stored all-FLAT."
                 )
+            # Market-neutral mode (improvement #79): re-express the consensus
+            # as a BTC-beta-neutral rank book — strongest longs vs weakest
+            # shorts — isolating coin-selection alpha from the market factor.
+            if cfg.risk.market_neutral and not gated:
+                from arena.risk import market_neutral_book
+
+                consensus = market_neutral_book(consensus, top_k=5)
         except Exception as exc:
             err.print(f"[dim]consensus v2 unavailable ({exc}); using v1.[/dim]")
             consensus = consensus_signals(signals_by_agent, weights)
@@ -791,7 +798,13 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         start_equity=settings.start_equity,
     )
 
-    table = Table(title=f"Backtest — {len(snapshots)} snapshots ({len(snapshots) - 1} rounds)")
+    bench = result.get("benchmark") or {}
+    title = f"Backtest — {len(snapshots)} snapshots ({len(snapshots) - 1} rounds)"
+    if bench:
+        title += f" | buy&hold {bench['symbol']}: ${bench['equity']:,.2f}"
+    if not result.get("survivorship_safe", True):
+        title += " | [survivorship caveat]"
+    table = Table(title=title)
     table.add_column("Agent", style="bold")
     table.add_column("Weight", justify="right")
     table.add_column("Avg score", justify="right")
@@ -811,6 +824,59 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             f"{regret.get(name, 0.0):.3f}",
         )
     console.print(table)
+    return 0
+
+
+def cmd_tune(args: argparse.Namespace) -> int:
+    """Grid-search arena parameters on replayed history (gradient-free)."""
+    from arena.agents import available_agents
+    from arena.backtest import synthetic_snapshots
+    from arena.backtest.tune import tune_parameters
+
+    console = _console()
+    err = _err_console()
+    cfg = _load_config(args)
+    settings = cfg.arena
+
+    if args.from_journal:
+        from arena.store.journal import Journal
+
+        journal = Journal(_db_path(args, cfg))
+        snapshots = journal.snapshots()
+        journal.close()
+        if len(snapshots) < 3:
+            err.print("[red]error:[/red] need >= 3 journaled rounds to tune.")
+            return 1
+    else:
+        snapshots = synthetic_snapshots(args.rounds, args.coins, seed=args.seed)
+
+    agents = available_agents(cfg.agents, mock=True)
+    result = tune_parameters(
+        snapshots,
+        agents,
+        fee_rate=settings.fee_rate_bps / 10_000.0,
+        flat_threshold_pct=settings.flat_threshold_pct,
+    )
+    table = Table(title="Parameter search (objective: top-agent Sharpe)")
+    for col in ("eta", "min_w", "max_w", "objective", "top agent", "top equity"):
+        table.add_column(col, justify="right")
+    for trial in result["trials"][:10]:
+        table.add_row(
+            f"{trial['eta']:g}",
+            f"{trial['min_weight']:g}",
+            f"{trial['max_weight']:g}",
+            f"{trial['objective']:+.3f}" if trial["objective"] != float("-inf") else "-",
+            trial["top_agent"],
+            f"${trial['top_equity']:,.0f}",
+        )
+    console.print(table)
+    best = result["best"]
+    if best:
+        console.print(
+            f"Best: eta={best['eta']:g} min_weight={best['min_weight']:g} "
+            f"max_weight={best['max_weight']:g} — set these in config.yaml "
+            "(with adaptive_eta: false) to adopt."
+        )
     return 0
 
 
@@ -878,11 +944,31 @@ def cmd_costs(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _breaker_check(
+    equity: float, peak: float, last_equity: float, cfg: "ArenaConfig"
+) -> str:
+    """Circuit-breaker state for the loop, from the consensus equity curve.
+
+    ``daily`` PnL is approximated by the change since the previous cycle and
+    drawdown by the in-process peak. Returns "ok" when the risk module is
+    unavailable (never blocks on plumbing).
+    """
+    try:
+        from arena.risk import circuit_breaker_state
+
+        pnl_pct = 100.0 * (equity - last_equity) / last_equity if last_equity > 0 else 0.0
+        dd_pct = 100.0 * (peak - equity) / peak if peak > 0 else 0.0
+        return circuit_breaker_state(pnl_pct, dd_pct, cfg.risk)
+    except Exception:
+        return "ok"
+
+
 def cmd_loop(args: argparse.Namespace) -> int:
     """Forever: evaluate due rounds, run a new round, sleep, repeat."""
     console = _console()
     err = _err_console()
     interval_mins: float = args.interval_mins
+    cfg = _load_config(args)
     eval_args = argparse.Namespace(
         config=args.config, db=args.db, mock=args.mock, offline=args.offline, force=False
     )
@@ -890,16 +976,47 @@ def cmd_loop(args: argparse.Namespace) -> int:
     console.print(
         f"Arena loop started (every {interval_mins:g} min). Press Ctrl-C to stop."
     )
+    peak = last_equity = 0.0
     try:
         while True:
             try:
                 cmd_evaluate(eval_args)
             except Exception as exc:  # a flaky evaluation must not kill the loop
                 err.print(f"[red]evaluate failed:[/red] {exc}")
+            # Hard circuit breaker (improvement #76): on daily-loss or
+            # max-drawdown breach, stop opening new rounds (keep evaluating).
+            halted = False
             try:
-                rc = cmd_run_round(args)
-                if rc != 0:
-                    err.print("[yellow]run-round did not complete; will retry next cycle.[/yellow]")
+                from arena.store import Store
+
+                store = Store(_db_path(args, cfg))
+                equity = store.get_equity("consensus", start_equity=cfg.arena.start_equity)
+                store.close()
+                peak = max(peak, equity)
+                if last_equity > 0:
+                    state = _breaker_check(equity, peak, last_equity, cfg)
+                    if state != "ok":
+                        halted = True
+                        err.print(
+                            f"[red]circuit breaker ({state}):[/red] skipping new "
+                            "rounds this cycle; evaluation continues."
+                        )
+                        try:
+                            from arena.ops import send_alert
+
+                            send_alert(f"Arena circuit breaker tripped: {state}", ops=cfg.ops)
+                        except Exception:
+                            pass
+                last_equity = equity
+            except Exception:
+                pass
+            try:
+                if not halted:
+                    rc = cmd_run_round(args)
+                    if rc != 0:
+                        err.print(
+                            "[yellow]run-round did not complete; will retry next cycle.[/yellow]"
+                        )
             except Exception as exc:  # a flaky round must not kill the loop
                 err.print(f"[red]run-round failed:[/red] {exc}")
             console.print(
@@ -983,6 +1100,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--from-journal", action="store_true", help="replay journaled snapshots instead"
     )
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_tune = sub.add_parser("tune", help="grid-search eta/weight bounds on replayed history")
+    _add_global_args(p_tune, suppress=True)
+    p_tune.add_argument("--rounds", type=int, default=40)
+    p_tune.add_argument("--coins", type=int, default=5)
+    p_tune.add_argument("--seed", type=int, default=0)
+    p_tune.add_argument("--from-journal", action="store_true")
+    p_tune.set_defaults(func=cmd_tune)
 
     p_rep = sub.add_parser("report", help="explainability report for one round (markdown)")
     _add_global_args(p_rep, suppress=True)

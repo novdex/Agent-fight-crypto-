@@ -53,6 +53,52 @@ Reading the perp data (when present):
 """
 
 
+def output_contract() -> str:
+    """The static instruction block (task + JSON rules, no per-round data).
+
+    Byte-stable across rounds so providers can place it in a cacheable
+    prompt prefix (improvement #93) — keep volatile content out of here.
+    """
+    horizon_hours = ArenaSettings().horizon_hours
+    return f"""You are a crypto trading-signal agent competing in an arena.
+
+Task: for EACH coin in the market snapshot, predict the price direction over the next {horizon_hours:g} hours.
+- LONG  = you expect the price to rise meaningfully.
+- SHORT = you expect the price to fall meaningfully.
+- FLAT  = you expect no meaningful move (or you are unsure).
+A move bigger than +1% counts as LONG, below -1% counts as SHORT, in between is FLAT.
+
+Respond with STRICT JSON only — no prose, no markdown fences, exactly this shape:
+{{"signals": [{{"symbol": "BTC", "p_long": 0.0, "p_short": 0.0, "p_flat": 0.0, "rationale": "..."}}, ...]}}
+
+Rules:
+- Exactly one entry per coin, covering every symbol in the snapshot.
+- "p_long", "p_short", "p_flat" are your honest probabilities for each outcome; they must sum to 1.0.
+- You are scored with a strictly proper rule (Brier): reporting your true probabilities maximizes your expected score; overconfidence is punished.
+- "rationale" is a brief (max ~20 words) justification.
+"""
+
+
+def market_section(snapshot: MarketSnapshot) -> str:
+    """The volatile per-round data block (snapshot + explicit symbol list)."""
+    coin_lines = "\n".join(_coin_line(c) for c in snapshot.coins)
+    symbols = ", ".join(snapshot.symbols)
+    fg_line = (
+        f"\nMarket-wide Fear & Greed index: {snapshot.fear_greed}/100"
+        if snapshot.fear_greed is not None
+        else ""
+    )
+    head_block = (
+        "\nRecent headlines:\n" + "\n".join(f"- {h}" for h in snapshot.headlines[:8])
+        if snapshot.headlines
+        else ""
+    )
+    return (
+        f"Market snapshot as of {snapshot.as_of.isoformat()}:{fg_line}\n"
+        f"{coin_lines}{head_block}\n\nCover every symbol: {symbols}."
+    )
+
+
 def build_prompt(snapshot: MarketSnapshot) -> str:
     """Build the trading-signal prompt presenting each coin's stats compactly."""
     horizon_hours = ArenaSettings().horizon_hours

@@ -6,7 +6,7 @@ import anthropic
 
 from arena.config import api_key_for
 from arena.agents.base import AgentError, BaseAgent
-from arena.agents.prompts import build_prompt, parse_signals
+from arena.agents.prompts import parse_signals
 from arena.models import AgentSpec, MarketSnapshot, Signal
 
 #: JSON schema enforced via structured outputs (improvement #92): malformed
@@ -47,10 +47,24 @@ class AnthropicAgent(BaseAgent):
         self.last_usage: dict = {}
 
     def _create(self, prompt: str, *, structured: bool):
+        # Cache-correct prompt structure (improvement #93): the byte-stable
+        # instruction block rides first as a cacheable system prefix; the
+        # volatile preamble + snapshot go in the user turn. Caching triggers
+        # automatically once the stable prefix clears the model's minimum
+        # cacheable length.
+        from arena.agents.prompts import output_contract
+
         kwargs: dict = dict(
             model=self.spec.model,
             max_tokens=16000,
             thinking={"type": "adaptive"},
+            system=[
+                {
+                    "type": "text",
+                    "text": output_contract(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": prompt}],
         )
         if structured:
@@ -75,7 +89,9 @@ class AnthropicAgent(BaseAgent):
             raise AgentError(f"Anthropic ask failed for agent {self.name!r}: {exc}") from exc
 
     def generate_signals(self, snapshot: MarketSnapshot) -> list[Signal]:
-        prompt = self.prompt_preamble + build_prompt(snapshot)
+        from arena.agents.prompts import market_section
+
+        prompt = self.prompt_preamble + market_section(snapshot)
         try:
             try:
                 response = self._create(prompt, structured=True)

@@ -32,6 +32,27 @@ def check_stops(
     return "open"
 
 
+def liquidation_price(
+    entry: float, direction: Direction, *, leverage: float, maintenance_margin_pct: float = 0.5
+) -> float | None:
+    """Price at which a leveraged perp position is force-closed.
+
+    Standard isolated-margin approximation: a position is liquidated when the
+    adverse move consumes ``1/leverage`` of notional minus the maintenance
+    margin. At 1x (or below) a long can only liquidate at ~0 and a short
+    can't be squeezed into liquidation by this model — returns None for
+    leverage <= 1 and for FLAT.
+    """
+    if direction == Direction.FLAT or leverage <= 1.0 or entry <= 0:
+        return None
+    bust_move = (1.0 / leverage) - maintenance_margin_pct / 100.0
+    if bust_move <= 0:
+        return None
+    if direction == Direction.LONG:
+        return entry * (1.0 - bust_move)
+    return entry * (1.0 + bust_move)
+
+
 def circuit_breaker_state(
     daily_pnl_pct: float, drawdown_pct: float, settings: RiskSettings
 ) -> str:

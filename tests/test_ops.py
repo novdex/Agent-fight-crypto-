@@ -131,3 +131,53 @@ def test_openai_compat_sends_response_format_with_fallback(
     assert sigs[0].p_long == pytest.approx(0.5)
     assert agent.last_usage == {"input_tokens": 11, "output_tokens": 7}
     assert agent.last_raw.startswith("{")
+
+
+def test_logprob_probs_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#22: probabilities derived from token logprobs via per-coin classification."""
+    import math
+
+    import arena.agents.openai_compat as oc
+    from arena.agents.openai_compat import OpenAICompatAgent
+    from arena.models import AgentSpec
+
+    main_payload = {
+        "choices": [{"message": {"content": json.dumps({"signals": [
+            {"symbol": "BTC", "p_long": 0.34, "p_short": 0.33, "p_flat": 0.33,
+             "rationale": "meh"}]})}}],
+        "usage": {},
+    }
+    lp_payload = {
+        "choices": [{"logprobs": {"content": [{"top_logprobs": [
+            {"token": "LONG", "logprob": -0.2},
+            {"token": "SHORT", "logprob": -2.0},
+            {"token": "FLAT", "logprob": -3.0},
+        ]}]}}]
+    }
+
+    class Resp:
+        def __init__(self, payload):  # noqa: ANN001
+            self._p = payload
+            self.status_code = 200
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self):  # noqa: ANN201
+            return self._p
+
+    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002,ANN001
+        return Resp(lp_payload) if "logprobs" in json else Resp(main_payload)
+
+    monkeypatch.setattr(oc.httpx, "post", fake_post)
+    monkeypatch.setattr(oc.time, "sleep", lambda s: None)
+    agent = OpenAICompatAgent(AgentSpec(
+        name="g", provider="openai_compat", base_url="https://x", model="m",
+        logprob_probs=True,
+    ))
+    sigs = agent.generate_signals(_snap())
+    btc = {s.symbol: s for s in sigs}["BTC"]
+    z = math.exp(-0.2) + math.exp(-2.0) + math.exp(-3.0)
+    assert btc.p_long == pytest.approx(math.exp(-0.2) / z)
+    assert btc.direction.value == "LONG"
+    assert btc.confidence == pytest.approx(btc.p_long)
